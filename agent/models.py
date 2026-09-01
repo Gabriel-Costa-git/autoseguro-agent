@@ -84,6 +84,7 @@ class Extraction(BaseModel):
     data_inicio: date | None = None       # já resolvida para data (prompt informa a data de hoje)
     data_vaga: bool = False               # "quanto antes", "só olhando" → policy usa hoje
     observacao: str | None = None         # qualquer coisa que a policy deva saber (curto)
+    indisponivel: bool = False            # LLM falhou (cota/rede/parse): policy pede para repetir, não re-pergunta
 
 
 # --------------------------------------------------------------------------- API de cotação

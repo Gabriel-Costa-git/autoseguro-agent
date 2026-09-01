@@ -27,7 +27,7 @@ CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 MAESTRO_DIR = CLAUDE_PROJECTS_DIR / "-workspace-autoseguro-agent"
 EXECUTOR_DIRS_GLOB = "-workspace-autoseguro-agent--exec-roles-*"
 
-_GOOGLE_KEY_RE = re.compile(r"AIza[0-9A-Za-z_-]{30,}")
+_GOOGLE_KEY_RE = re.compile(r"(?:AIza[0-9A-Za-z_-]{30,}|AQ\.[0-9A-Za-z_-]{30,})")
 _APIKEY_RE = re.compile(r"apikey[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9_-]{16,}", re.IGNORECASE)
 _EMAIL_COUNT_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 
