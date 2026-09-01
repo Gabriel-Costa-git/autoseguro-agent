@@ -5,6 +5,10 @@ lista de ações. Sem I/O e sem LLM, porque decisão de venda (cotar, recusar,
 escalar) precisa ser determinística, testável e auditável; o LLM só extrai
 dados e transforma `AskField`/`Reply` em texto.
 
+Quando a extração vem marcada `indisponivel` (LLM fora do ar), a policy não
+decide nada: pede a mensagem de novo. Repetir a última pergunta seria pior — o
+lead veria o mesmo texto várias vezes sem entender por quê.
+
 Duas re-entradas do `conversation.py` chegam com `extraction=None` e NÃO são
 mensagem de mídia: pós-cotação (stage COTANDO com `quote_result`) e pós-lookup
 de CEP (stage CONFIRMA_CEP com `cep_info`). Elas são tratadas antes da regra
@@ -55,6 +59,9 @@ TXT_TERMINAL_ENCERRADO = (
     "que um consultor te ajuda."
 )
 TXT_AGUARDE = "Só um instante, estou puxando a cotação certinho pra você."
+TXT_INSTABILIDADE = (
+    "Tive uma instabilidade aqui do meu lado e não consegui ler sua mensagem. Pode repetir?"
+)
 TXT_DATA_PASSADA = (
     "Essa data de início já passou, então não consigo usar. A vigência começa a "
     "partir de hoje — se quiser começar depois, me diga outra data."
@@ -135,6 +142,12 @@ def next_action(
 
     if extraction is None:
         return _com_estagnacao(s, [SendText(text=TXT_MIDIA)], progresso=False)
+
+    # Extração indisponível (LLM fora): não sabemos o que o lead disse, então NÃO
+    # re-executamos o fluxo — foi assim que o lead levou a lista de planos 3x seguidas.
+    # Pede para repetir e conta como turno sem progresso: se o LLM ficar fora, escala.
+    if extraction.indisponivel:
+        return _com_estagnacao(s, [SendText(text=TXT_INSTABILIDADE)], progresso=False)
 
     intent = extraction.intent
     if intent is Intent.PEDIR_HUMANO:

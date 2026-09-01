@@ -31,7 +31,7 @@ from agent.models import (
     Stage,
     Violation,
 )
-from agent.policy import next_action
+from agent.policy import TXT_INSTABILIDADE, next_action
 
 HOJE = date(2026, 9, 1)
 
@@ -509,3 +509,74 @@ def test_pedir_desconto_apresentado_vai_direto_para_negociacao():
     s, acoes = _act(_completo(stage=Stage.APRESENTADO, quote_result=_result()), _extr(intent=Intent.PEDIR_DESCONTO))
     assert s.stage is Stage.HANDOFF and s.handoff_reason is HandoffReason.NEGOCIACAO
     assert isinstance(acoes[0], Handoff)
+
+
+# --------------------------------------------------------------------------- extração indisponível
+def _indisponivel(**kw) -> Extraction:
+    """Como o brain marca quando o LLM falha de vez (cota/rede/parse)."""
+    kw.setdefault("intent", Intent.OUTRO)
+    kw.setdefault("observacao", "extracao_indisponivel")
+    return Extraction(indisponivel=True, **kw)
+
+
+def test_indisponivel_em_escolha_plano_nao_repete_a_lista_de_planos():
+    """Regressão do log demo-feliz-01: o lead recebeu o AskPlan 3x seguidas."""
+    s, acoes = _act(_completo(stage=Stage.ESCOLHA_PLANO, plano_id=None), _indisponivel())
+    assert acoes == [SendText(text=TXT_INSTABILIDADE)]
+    assert not any(isinstance(a, AskPlan) for a in acoes)
+    assert s.stage is Stage.ESCOLHA_PLANO
+
+
+def test_indisponivel_em_coleta_cep_nao_repete_a_pergunta():
+    s, acoes = _act(
+        _state(idade=35, veiculo_ano=2019, stage=Stage.COLETA_CEP, ultima_pergunta="cep"),
+        _indisponivel(),
+    )
+    assert acoes == [SendText(text=TXT_INSTABILIDADE)]
+    assert not any(isinstance(a, AskField) for a in acoes)
+    assert s.stage is Stage.COLETA_CEP
+
+
+def test_indisponivel_em_apresentado_pede_para_repetir_sem_escalar():
+    estado = _completo(stage=Stage.APRESENTADO, quote_result=_result())
+    s, acoes = _act(estado, _indisponivel())
+    assert acoes == [SendText(text=TXT_INSTABILIDADE)]
+    assert s.stage is Stage.APRESENTADO
+    assert s.handoff_reason is None
+
+
+def test_indisponivel_nao_absorve_nem_obedece_o_que_veio_junto():
+    """Se o LLM falhou, o conteúdo da extração não é confiável — nem dados, nem intent."""
+    s, acoes = _act(
+        _state(stage=Stage.COLETA_IDADE),
+        _indisponivel(intent=Intent.PEDIR_HUMANO, idade=99, plano_id="premium"),
+    )
+    assert acoes == [SendText(text=TXT_INSTABILIDADE)]
+    assert s.idade is None
+    assert s.plano_id is None
+    assert s.stage is Stage.COLETA_IDADE
+
+
+def test_indisponivel_repetido_escala_para_humano():
+    s = _completo(stage=Stage.ESCOLHA_PLANO, plano_id=None)
+    for _ in range(settings.max_turnos_sem_progresso - 1):
+        s, acoes = _act(s, _indisponivel())
+        assert isinstance(acoes[0], SendText)
+    s, acoes = _act(s, _indisponivel())
+    assert isinstance(acoes[0], Handoff)
+    assert acoes[0].reason is HandoffReason.SEM_PROGRESSO
+    assert s.stage is Stage.HANDOFF
+
+
+@pytest.mark.parametrize("stage", [Stage.HANDOFF, Stage.ENCERRADO, Stage.ENCERRADO_RECUSA])
+def test_indisponivel_em_estado_terminal_mantem_a_resposta_terminal(stage: Stage):
+    _, acoes = _act(_state(stage=stage), _indisponivel())
+    assert isinstance(acoes[0], SendText)
+    assert acoes[0].text != TXT_INSTABILIDADE
+
+
+def test_intent_outro_sem_indisponivel_mantem_o_comportamento_antigo():
+    _, acoes = _act(
+        _completo(stage=Stage.ESCOLHA_PLANO, plano_id=None), _extr(intent=Intent.OUTRO)
+    )
+    assert isinstance(acoes[0], AskPlan)
