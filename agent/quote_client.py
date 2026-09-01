@@ -84,7 +84,7 @@ class QuoteClient:
         req: QuoteRequest,
         on_slow: Callable[[], Awaitable[None]] | None = None,
     ) -> QuoteResult:
-        quote_id = uuid.uuid4().hex[:8]
+        quote_id = "q" + uuid.uuid4().hex[:8]  # prefixo: id só de dígitos seria mascarado como CEP no log
         payload = req.model_dump(exclude_none=True)
         attempts: list[QuoteAttempt] = []
         start = self._clock()
