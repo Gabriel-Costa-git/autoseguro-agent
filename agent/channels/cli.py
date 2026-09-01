@@ -19,6 +19,7 @@ from agent.config import settings
 from agent.conversation import Conversation, InMemoryStateStore
 from agent.models import Inbound, LeadState, Outbound
 from agent.pii import mask_text
+from agent.policy import TXT_INSTABILIDADE
 from agent.quote_client import QuoteClient, QuotePlanosUnavailable
 from agent.rules import Rules
 
@@ -77,10 +78,15 @@ async def conversar(
     cota por minuto do provedor de LLM.
     """
 
+    ultima_saida = ""
+
     async def emit(out: Outbound) -> None:
+        nonlocal ultima_saida
+        ultima_saida = out.text
         print(f"🤖 {out.text}\n")
 
     roteiro = list(mensagens) if mensagens is not None else None
+    repeticoes = 0  # no roteiro, reenvia a linha quando o agente pede para repetir (LLM instável)
     turno = 0
     primeira = True
     while True:
@@ -120,6 +126,10 @@ async def conversar(
             inbound = Inbound(conversation_id=conversation_id, message_id=f"m{turno}", text=linha)
 
         await conv.handle(inbound, emit)
+        if roteiro is not None and ultima_saida == TXT_INSTABILIDADE and repeticoes < 2:
+            repeticoes += 1
+            print(f"[roteiro: agente pediu para repetir, reenviando ({repeticoes}/2)]")
+            roteiro.insert(0, linha)
 
 
 async def run(script: Path | None = None, conversation_id: str | None = None, delay: float = 0.0) -> int:
