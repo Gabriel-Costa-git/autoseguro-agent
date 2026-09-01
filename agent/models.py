@@ -65,7 +65,8 @@ class Intent(StrEnum):
     ACEITAR = "aceitar"              # quer fechar a cotação apresentada
     RECUSAR = "recusar"              # não quer seguir
     PEDIR_HUMANO = "pedir_humano"
-    OBJECAO_PRECO = "objecao_preco"  # "tá caro", "vi mais barato", pede desconto
+    OBJECAO_PRECO = "objecao_preco"  # "tá caro", "vi mais barato"
+    PEDIR_DESCONTO = "pedir_desconto"  # pede desconto/condição explicitamente → humano
     FORA_DE_ESCOPO = "fora_de_escopo"  # sinistro, apólice existente, outro produto
     OUTRO = "outro"
 

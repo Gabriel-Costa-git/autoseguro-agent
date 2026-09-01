@@ -1,0 +1,288 @@
+"""Orquestração de um turno: entrada do canal → extração → policy → ações → saídas.
+
+Este módulo não decide nada e não formata preço: ele executa as `Action`s que a
+`policy` devolveu, chamando o LLM só onde a ação pede texto livre (`AskField`,
+`Reply`) e o `presenter` no resto. Toda decisão e todo efeito viram evento no log
+JSONL da conversa, que é o rastro auditável da entrega.
+
+`policy`, `presenter`, `cep` e o logger entram por injeção (com o módulo real como
+padrão) para o turno ser testável sem rede, sem LLM e sem depender da ordem em que
+os módulos irmãos ficam prontos.
+"""
+from __future__ import annotations
+
+import logging
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+from agent.brain import directive_for_field
+from agent.config import settings
+from agent.models import (
+    Action,
+    Extraction,
+    HandoffReason,
+    Inbound,
+    LeadState,
+    Outbound,
+    SendText,
+    Stage,
+)
+
+log = logging.getLogger("autoseguro.conversation")
+
+TEXTO_ERRO = "Tive um problema aqui do meu lado. Um consultor vai te chamar pra continuar com você."
+TEXTO_LENTO = "Só um instante, estou consultando o sistema..."
+
+# Uma rodada extra por efeito (cotação, lookup de CEP) já cobre o fluxo; o limite
+# existe só para nenhum bug de policy virar laço infinito de mensagens.
+MAX_RODADAS = 3
+
+
+class InMemoryStateStore:
+    """Store de estado em memória (o CLI usa; um canal real trocaria por Redis/DB)."""
+
+    def __init__(self) -> None:
+        self._estados: dict[str, LeadState] = {}
+
+    def get(self, conversation_id: str) -> LeadState | None:
+        estado = self._estados.get(conversation_id)
+        return estado.model_copy(deep=True) if estado else None
+
+    def put(self, state: LeadState) -> None:
+        self._estados[state.conversation_id] = state.model_copy(deep=True)
+
+
+@dataclass
+class _Turno:
+    """Contexto vivo de um turno (destinatário das saídas e do log)."""
+
+    inbound: Inbound
+    emit: Callable[[Outbound], Awaitable[None]]
+    logger: Any
+    today: date
+    saidas: int = field(default=0)
+
+
+class Conversation:
+    def __init__(
+        self,
+        rules: Any,
+        quote_client: Any,
+        extractor: Any,
+        responder: Any,
+        log_dir: Path,
+        store: Any,
+        today: Callable[[], date] = date.today,
+        *,
+        next_action: Callable[..., tuple[LeadState, list[Action]]] | None = None,
+        render: Callable[[Action, LeadState], str] | None = None,
+        lookup_cep: Callable[..., Awaitable[Any]] | None = None,
+        logger_factory: Callable[[Path, str], Any] | None = None,
+        cep_timeout_s: float | None = None,
+    ) -> None:
+        self.rules = rules
+        self.quote_client = quote_client
+        self.extractor = extractor
+        self.responder = responder
+        self.log_dir = Path(log_dir)
+        self.store = store
+        self._today = today
+        self._cep_timeout_s = cep_timeout_s if cep_timeout_s is not None else settings.viacep_timeout_s
+
+        if next_action is None:
+            from agent.policy import next_action as next_action_real
+
+            next_action = next_action_real
+        if render is None:
+            from agent.presenter import render as render_real
+
+            render = render_real
+        if lookup_cep is None:
+            from agent.cep import lookup_cep as lookup_cep_real
+
+            lookup_cep = lookup_cep_real
+        if logger_factory is None:
+            from agent.observability import ConversationLogger
+
+            logger_factory = ConversationLogger
+        self._next_action = next_action
+        self._render = render
+        self._lookup_cep = lookup_cep
+        self._logger_factory = logger_factory
+
+    # ------------------------------------------------------------------ turno
+    async def handle(self, inbound: Inbound, emit: Callable[[Outbound], Awaitable[None]]) -> LeadState:
+        """Processa uma mensagem do lead. Nunca levanta e nunca deixa o lead sem resposta."""
+        state = self.store.get(inbound.conversation_id) or LeadState(conversation_id=inbound.conversation_id)
+        if inbound.sender_name and not state.lead_nome:
+            state.lead_nome = inbound.sender_name.split()[0]
+        turno = _Turno(
+            inbound=inbound,
+            emit=emit,
+            logger=self._logger_factory(self.log_dir, inbound.conversation_id),
+            today=self._today(),
+        )
+        turno.logger.event(
+            "inbound",
+            message_id=inbound.message_id,
+            text=inbound.text,
+            media_type=inbound.media_type,
+            sender_name=inbound.sender_name,
+        )
+        try:
+            extraction = await self._extrair(state, turno)
+            state = await self._decidir_e_executar(state, extraction, turno, rodada=0)
+        except Exception as exc:  # noqa: BLE001 — o lead não pode ficar no vácuo
+            state = await self._falhar(state, turno, exc)
+        self.store.put(state)
+        return state
+
+    async def _extrair(self, state: LeadState, turno: _Turno) -> Extraction | None:
+        """Mídia sem texto não passa pelo LLM: `None` sinaliza isso para a policy."""
+        inbound = turno.inbound
+        if inbound.media_type != "text" or not (inbound.text or "").strip():
+            return None
+        inicio = time.perf_counter()
+        extraction = await self.extractor.extract(inbound.text or "", state, turno.today)
+        turno.logger.event(
+            "llm_call",
+            message_id=inbound.message_id,
+            papel="extractor",
+            latency_ms=int((time.perf_counter() - inicio) * 1000),
+        )
+        turno.logger.event("extraction", message_id=inbound.message_id, **extraction.model_dump(mode="json"))
+        return extraction
+
+    async def _decidir_e_executar(
+        self, state: LeadState, extraction: Extraction | None, turno: _Turno, rodada: int
+    ) -> LeadState:
+        state, actions = self._next_action(state, extraction, self.rules, turno.today)
+        turno.logger.event(
+            "decision",
+            message_id=turno.inbound.message_id,
+            stage=state.stage.value,
+            actions=[a.kind for a in actions],
+        )
+        for action in actions:
+            state = await self._executar(state, action, turno, rodada)
+        return await self._resolver_cep_pendente(state, turno, rodada)
+
+    async def _resolver_cep_pendente(self, state: LeadState, turno: _Turno, rodada: int) -> LeadState:
+        """CONFIRMA_CEP sem `cep_info` = a policy está esperando o ViaCEP. Busca e redecide."""
+        if rodada >= MAX_RODADAS or state.stage is not Stage.CONFIRMA_CEP or state.cep_info is not None:
+            return state
+        if not state.cep:
+            return state
+        info = await self._lookup_cep(state.cep, self._cep_timeout_s)
+        state.cep_info = info
+        turno.logger.event(
+            "cep_lookup",
+            message_id=turno.inbound.message_id,
+            existe=info.existe,
+            cidade=info.cidade,
+            uf=info.uf,
+        )
+        return await self._decidir_e_executar(state, None, turno, rodada + 1)
+
+    # ------------------------------------------------------------------ ações
+    async def _executar(self, state: LeadState, action: Action, turno: _Turno, rodada: int) -> LeadState:
+        if action.kind in ("send_text", "confirm_cep", "ask_plan", "present", "refuse", "handoff"):
+            if action.kind == "refuse":
+                turno.logger.event("refusal", message_id=turno.inbound.message_id, motivo=action.motivo)
+            if action.kind == "handoff":
+                turno.logger.event(
+                    "handoff",
+                    message_id=turno.inbound.message_id,
+                    reason=action.reason.value,
+                    payload=action.payload,
+                )
+            await self._enviar(self._render(action, state), "template", turno)
+            return state
+
+        if action.kind in ("ask_field", "reply"):
+            if action.kind == "ask_field":
+                directive = directive_for_field(action.campo, action.motivo)
+                state.ultima_pergunta = action.campo
+            else:
+                directive = action.directive
+            inicio = time.perf_counter()
+            texto = await self.responder.reply(directive, state, turno.inbound.text or "")
+            turno.logger.event(
+                "llm_call",
+                message_id=turno.inbound.message_id,
+                papel="responder",
+                directive=directive,
+                latency_ms=int((time.perf_counter() - inicio) * 1000),
+            )
+            await self._enviar(texto, "llm", turno)
+            return state
+
+        if action.kind == "do_quote":
+            return await self._cotar(state, action, turno, rodada)
+
+        raise ValueError(f"ação desconhecida: {action.kind}")
+
+    async def _cotar(self, state: LeadState, action: Any, turno: _Turno, rodada: int) -> LeadState:
+        async def on_slow() -> None:
+            await self._enviar(self._render(SendText(text=TEXTO_LENTO), state), "template", turno)
+
+        result = await self.quote_client.quote(action.request, on_slow)
+        for attempt in result.attempts:
+            turno.logger.event(
+                "quote_attempt",
+                message_id=turno.inbound.message_id,
+                quote_id=result.quote_id,
+                **attempt.model_dump(mode="json"),
+            )
+        turno.logger.event(
+            "quote_result",
+            message_id=turno.inbound.message_id,
+            quote_id=result.quote_id,
+            outcome=result.outcome.value,
+            motivo_recusa=result.motivo_recusa,
+            erro=result.erro,
+            total_ms=result.total_ms,
+        )
+        state.quote_result = result
+        if rodada >= MAX_RODADAS:
+            return state
+        return await self._decidir_e_executar(state, None, turno, rodada + 1)
+
+    # ------------------------------------------------------------------ saída
+    async def _enviar(self, texto: str, source: str, turno: _Turno) -> None:
+        turno.saidas += 1
+        out = Outbound(
+            conversation_id=turno.inbound.conversation_id,
+            message_id=f"{turno.inbound.message_id}-o{turno.saidas}",
+            text=texto,
+            in_reply_to=turno.inbound.message_id,
+            source=source,  # type: ignore[arg-type]
+        )
+        await turno.emit(out)
+        turno.logger.event("outbound", message_id=out.message_id, text=out.text, source=source)
+
+    async def _falhar(self, state: LeadState, turno: _Turno, exc: Exception) -> LeadState:
+        """Erro inesperado: avisa o lead com texto neutro e escala. Log sem stack (PII)."""
+        turno.logger.event(
+            "error",
+            message_id=turno.inbound.message_id,
+            erro=type(exc).__name__,
+            detalhe=str(exc)[:200],
+        )
+        state.stage = Stage.HANDOFF
+        state.handoff_reason = HandoffReason.ERRO_INTERNO
+        try:
+            await self._enviar(TEXTO_ERRO, "template", turno)
+            turno.logger.event(
+                "handoff",
+                message_id=turno.inbound.message_id,
+                reason=HandoffReason.ERRO_INTERNO.value,
+                payload={"conversation_id": state.conversation_id, "motivo": "erro_interno"},
+            )
+        except Exception as envio:  # noqa: BLE001 — canal caiu; o estado já registra o handoff
+            log.error("falha ao avisar o lead do erro: %s", type(envio).__name__)
+        return state
