@@ -185,8 +185,40 @@ policy e presenter puros. Há um teste que faz grep no `presenter.py` para garan
 valor de preço está fixo em template.
 
 ## Log de uma execução completa
-_[a preencher após a rodada real: caminho em `logs/`, roteiro usado, e uma execução com
-`QUOTE_FAILURE_RATE=1` mostrando o handoff `COTACAO_INDISPONIVEL` sem preço inventado]_
+Três execuções reais (Gemini `gemini-3.5-flash-lite` + API de cotação em docker), geradas pelo
+CLI em modo roteiro e commitadas em `logs/entrega/`:
+
+| Arquivo | Cenário | Desfecho |
+|---|---|---|
+| `logs/entrega/caminho-feliz.jsonl` | `scripts/roteiro-feliz.txt`: saudação → idade (com CPF, e-mail e telefone não solicitados) → Onix 2022 → CEP confirmado via ViaCEP → escolhe Completo → cotação → "fechado" | `present` com R$ 209,90/mês vindo da API, depois `handoff` `lead_aceitou` |
+| `logs/entrega/recusa-negocio.jsonl` | `scripts/roteiro-recusa.txt`: lead de 78 anos | `refusal` honesto, sem handoff, sem chamada à API |
+| `logs/entrega/quote-indisponivel-handoff.jsonl` | mesmo roteiro feliz contra a API com `QUOTE_FAILURE_RATE=1` | 4 `quote_attempt` (500/502/503/502) em 2,9 s → `quote_result` `indisponivel` → `handoff` `cotacao_indisponivel`, **nenhum valor na conversa** |
+
+Cada linha do JSONL é um evento com `ts`, `conversation_id`, `event`, `message_id`, `quote_id`
+e `data`. O trecho do handoff do caminho feliz (resumido) mostra o que o consultor humano recebe:
+
+```json
+{"event": "handoff", "message_id": "m8",
+ "data": {"reason": "lead_aceitou",
+          "payload": {"dados": {"idade": 35, "veiculo_texto": "Onix 2022", "veiculo_ano": 2022,
+                                "cep": "01310-***", "cep_cidade": "São Paulo", "cep_uf": "SP",
+                                "plano_id": "completo", "data_inicio": null},
+                      "cotacao": {"quote_id": "q…", "outcome": "ok",
+                                  "quote": {"plano_nome": "Completo", "premio_mensal": 209.9,
+                                            "franquia": 3000.0, "carencia_dias": 30, "...": "..."},
+                                  "attempts": [{"attempt": 1, "status": "ok", "http_status": 200, "latency_ms": 20}]},
+                      "motivo": "lead_aceitou", "conversation_id": "demo-feliz-v3"}}}
+```
+
+A mensagem com CPF, e-mail e telefone aparece no log já mascarada (`***.***.***-**`,
+`***@gmail.com`, `+55 ** *****-****`), porque a máscara roda na borda do log. A degradação
+honesta quando o próprio LLM falha ("não consegui ler sua mensagem, pode repetir?") apareceu
+em rodadas de desenvolvimento sob a cota gratuita e está coberta por teste; o CLI em modo
+roteiro reenvia a linha quando o agente pede.
+
+**Gate de PII da entrega:** `uv run python scripts/check_logs_pii.py "logs/entrega/*.jsonl"`
+varre os três logs por CPF, e-mail, telefone, placa e CEP completo e falha se achar qualquer um
+em claro. Resultado na entrega: `3 arquivo(s) verificado(s), 0 ocorrência(s) de PII em claro`.
 
 ## Transparência de uso de IA
 Construído com Claude Code orquestrando executores paralelos (Orq). Em `ai-logs/`:
