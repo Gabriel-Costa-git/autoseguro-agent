@@ -1,11 +1,26 @@
-"""Testes da camada LLM: montagem dos prompts e guardrail anti-preço (sem rede, sem chave)."""
+"""Testes da camada LLM: prompts, guardrail anti-preço e resiliência à cota do Gemini.
+
+Sem rede, sem chave e sem SDK: os agentes recebem um dublê de `agno.Agent` e um
+`sleep` falso, então o retry é testado em tempo zero.
+"""
 from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
 from agent.brain import (
     FALLBACK_PADRAO,
     FALLBACKS,
+    MAX_TENTATIVAS_LLM,
+    ChamadaLLMFalhou,
+    Extractor,
+    Responder,
+    _com_retry,
+    _e_transitorio,
+    _erro_do_run,
+    _retry_delay,
+    _status_do_erro,
     build_extraction_instructions,
     build_responder_instructions,
     contem_preco,
@@ -13,8 +28,19 @@ from agent.brain import (
     guard_price,
     resumo_state,
 )
-from agent.models import CepInfo, LeadState, Stage
-from tests.fakes import quote_indisponivel, quote_ok
+from agent.models import CepInfo, Extraction, Intent, LeadState, Stage
+from tests.fakes import (
+    ERRO_400,
+    ERRO_429,
+    ERRO_429_SEM_DELAY,
+    ClockFake,
+    FakeAgnoAgent,
+    FakeRun,
+    SleepFake,
+    quote_indisponivel,
+    quote_ok,
+    run_erro,
+)
 
 HOJE = date(2026, 9, 1)
 
@@ -138,3 +164,175 @@ def test_guard_price_nao_mexe_em_texto_limpo():
 def test_fallbacks_nao_contem_preco():
     for texto in [*FALLBACKS.values(), FALLBACK_PADRAO]:
         assert not contem_preco(texto)
+
+
+# --------------------------------------------------------------------------- resiliência do LLM
+class _Erro(RuntimeError):
+    """Erro com o corpo do provedor, como o `ModelProviderError` do agno chega em `str(exc)`."""
+
+
+async def _sempre_falha(mensagem: str, contador: list[int]):
+    contador.append(1)
+    raise _Erro(mensagem)
+
+
+def test_status_do_erro_le_atributo_e_corpo():
+    assert _status_do_erro(ChamadaLLMFalhou("x", status_code=429)) == 429
+    assert _status_do_erro(_Erro(ERRO_429)) == 429
+    assert _status_do_erro(_Erro(ERRO_400)) == 400
+    assert _status_do_erro(_Erro("erro sem código")) is None
+
+
+def test_classificacao_transitoria():
+    assert _e_transitorio(_Erro(ERRO_429))          # cota estourada: espera e tenta de novo
+    assert _e_transitorio(_Erro('{"error": {"code": 503, "status": "UNAVAILABLE"}}'))
+    assert _e_transitorio(TimeoutError("deadline"))
+    assert _e_transitorio(_Erro("model is overloaded, try again"))
+    assert not _e_transitorio(_Erro(ERRO_400))      # payload inválido é bug nosso
+    assert not _e_transitorio(_Erro("schema inválido"))
+
+
+def test_retry_delay_sai_do_retryinfo_do_provedor():
+    assert _retry_delay(_Erro(ERRO_429)) == 4.0
+    assert _retry_delay(_Erro(ERRO_429_SEM_DELAY)) is None
+
+
+@pytest.mark.asyncio
+async def test_com_retry_respeita_o_retrydelay_e_acerta_na_segunda():
+    sleep, chamadas = SleepFake(), []
+
+    async def fn():
+        chamadas.append(1)
+        if len(chamadas) == 1:
+            raise _Erro(ERRO_429)
+        return "ok"
+
+    assert await _com_retry(fn, sleep=sleep) == "ok"
+    assert sleep.esperas == [4.0]                   # o provedor pediu 4s; obedecemos
+    assert len(chamadas) == 2
+
+
+@pytest.mark.asyncio
+async def test_com_retry_sem_retrydelay_usa_backoff_2_4_8():
+    sleep, chamadas = SleepFake(), []
+    with pytest.raises(_Erro):
+        await _com_retry(lambda: _sempre_falha(ERRO_429_SEM_DELAY, chamadas), sleep=sleep)
+    assert sleep.esperas == [2.0, 4.0, 8.0]
+    assert len(chamadas) == MAX_TENTATIVAS_LLM == 4  # 1 chamada + 3 novas tentativas
+
+
+@pytest.mark.asyncio
+async def test_com_retry_esgota_em_tres_falhas_quando_configurado():
+    sleep, chamadas = SleepFake(), []
+    with pytest.raises(_Erro):
+        await _com_retry(lambda: _sempre_falha(ERRO_429_SEM_DELAY, chamadas), sleep=sleep, max_tentativas=3)
+    assert len(chamadas) == 3 and sleep.esperas == [2.0, 4.0]
+
+
+@pytest.mark.asyncio
+async def test_com_retry_nao_re_tenta_erro_nosso():
+    sleep, chamadas = SleepFake(), []
+    with pytest.raises(_Erro):
+        await _com_retry(lambda: _sempre_falha(ERRO_400, chamadas), sleep=sleep)
+    assert len(chamadas) == 1 and sleep.esperas == []
+
+
+@pytest.mark.asyncio
+async def test_com_retry_para_quando_a_proxima_espera_estoura_o_orcamento():
+    sleep, chamadas = SleepFake(), []
+    with pytest.raises(_Erro):
+        await _com_retry(
+            lambda: _sempre_falha(ERRO_429_SEM_DELAY, chamadas),
+            sleep=sleep,
+            budget_s=6.0,
+            clock=ClockFake(passo=3.0),
+        )
+    assert sleep.esperas == [2.0]                   # a 2ª espera (4s) passaria dos 6s de orçamento
+    assert len(chamadas) == 2
+
+
+def test_erro_do_run_le_o_status_que_o_agno_marca():
+    """O agno não levanta: marca `status=ERROR` e joga `str(exc)` no `content`."""
+    assert _erro_do_run(run_erro(ERRO_429)) == ERRO_429
+    assert _erro_do_run(FakeRun(content="tudo certo")) is None
+    assert _erro_do_run(FakeRun(content=None, status="ERROR")) == "erro sem detalhe do provedor"
+
+
+# --------------------------------------------------------------------------- degradação honesta
+def _extractor(respostas, sleep=None) -> Extractor:
+    return Extractor(agent=FakeAgnoAgent(respostas), sleep=sleep or SleepFake())
+
+
+def _responder(respostas, sleep=None) -> Responder:
+    return Responder(agent=FakeAgnoAgent(respostas), sleep=sleep or SleepFake())
+
+
+@pytest.mark.asyncio
+async def test_extractor_re_tenta_a_cota_e_entrega_a_extracao():
+    sleep = SleepFake()
+    esperada = Extraction(intent=Intent.ESCOLHER_PLANO, plano_id="completo")
+    ex = _extractor([run_erro(ERRO_429), FakeRun(content=esperada)], sleep)
+
+    saida = await ex.extract("quero o completo", _state(), HOJE)
+    assert saida.plano_id == "completo" and saida.indisponivel is False
+    assert sleep.esperas == [4.0]
+
+
+@pytest.mark.asyncio
+async def test_extractor_esgotado_marca_indisponivel():
+    """Sem extração, a policy pede para o lead repetir — não re-pergunta o mesmo campo."""
+    ex = _extractor([run_erro(ERRO_429) for _ in range(4)])
+    saida = await ex.extract("quero o completo", _state(ultima_pergunta="plano"), HOJE)
+
+    assert saida.indisponivel is True
+    assert saida.intent is Intent.OUTRO
+    assert saida.observacao == "extracao_indisponivel"
+
+
+@pytest.mark.asyncio
+async def test_extractor_com_conteudo_fora_do_schema_nao_re_tenta():
+    agent = FakeAgnoAgent([FakeRun(content="desculpe, não entendi")])
+    ex = Extractor(agent=agent, sleep=SleepFake())
+    saida = await ex.extract("oi", _state(), HOJE)
+
+    assert saida.indisponivel is True
+    assert len(agent.chamadas) == 1                 # queimar cota nisso não adianta
+
+
+@pytest.mark.asyncio
+async def test_extractor_tambem_trata_excecao_levantada():
+    ex = _extractor([_Erro(ERRO_429), _Erro(ERRO_429), _Erro(ERRO_429), _Erro(ERRO_429)])
+    assert (await ex.extract("oi", _state(), HOJE)).indisponivel is True
+
+
+@pytest.mark.asyncio
+async def test_responder_re_tenta_e_devolve_o_texto():
+    sleep = SleepFake()
+    resp = _responder([run_erro(ERRO_429), FakeRun(content="Qual o ano do carro?")], sleep)
+    assert await resp.reply("pergunte o ano", _state(), "é um Onix") == "Qual o ano do carro?"
+    assert sleep.esperas == [4.0]
+
+
+@pytest.mark.asyncio
+async def test_responder_esgotado_cai_no_fallback_do_campo():
+    resp = _responder([run_erro(ERRO_429) for _ in range(4)])
+    saida = await resp.reply("peça o CEP", _state(ultima_pergunta="cep"), "moro em SP")
+    assert saida == FALLBACKS["cep"]                # o lead nunca fica sem resposta
+
+
+@pytest.mark.asyncio
+async def test_responder_esgotado_sem_pergunta_pendente_usa_fallback_padrao():
+    resp = _responder([_Erro(ERRO_429) for _ in range(4)])
+    assert await resp.reply("responda", _state(), "e aí?") == FALLBACK_PADRAO
+
+
+@pytest.mark.asyncio
+async def test_responder_com_resposta_vazia_nao_devolve_vazio():
+    resp = _responder([FakeRun(content="   ")])
+    assert await resp.reply("peça a idade", _state(ultima_pergunta="idade"), "oi") == FALLBACKS["idade"]
+
+
+@pytest.mark.asyncio
+async def test_responder_ainda_passa_pelo_guardrail_de_preco():
+    resp = _responder([FakeRun(content="Fica R$ 180,00 por mês!")])
+    assert await resp.reply("peça o CEP", _state(ultima_pergunta="cep"), "quanto fica?") == FALLBACKS["cep"]

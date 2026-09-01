@@ -2,7 +2,8 @@
 
 É o canal de demonstração — `emit` imprime, `Inbound` vem do stdin. A flag
 `--script` roda um roteiro (uma mensagem por linha) sem interação, que é como se
-gera o log JSONL de execução da entrega.
+gera o log JSONL de execução da entrega; `--delay` espaça as mensagens do roteiro
+para caber na cota gratuita do Gemini (5 req/min, e cada turno gasta 2 chamadas).
 """
 from __future__ import annotations
 
@@ -64,18 +65,32 @@ def _resumo(state: LeadState | None) -> str:
     return mask_text(resumo_state(state)) if state else "(nada coletado ainda)"
 
 
-async def conversar(conv: Conversation, conversation_id: str, mensagens: list[str] | None = None) -> None:
-    """Loop de turnos. Com `mensagens`, roda o roteiro; sem elas, lê o stdin."""
+async def conversar(
+    conv: Conversation,
+    conversation_id: str,
+    mensagens: list[str] | None = None,
+    delay: float = 0.0,
+) -> None:
+    """Loop de turnos. Com `mensagens`, roda o roteiro; sem elas, lê o stdin.
+
+    `delay` só vale no roteiro: é o intervalo entre mensagens, para não estourar a
+    cota por minuto do provedor de LLM.
+    """
 
     async def emit(out: Outbound) -> None:
         print(f"🤖 {out.text}\n")
 
     roteiro = list(mensagens) if mensagens is not None else None
     turno = 0
+    primeira = True
     while True:
         if roteiro is not None:
             if not roteiro:
                 break
+            if delay > 0 and not primeira:
+                print(f"[aguardando {delay:g}s]")
+                await asyncio.sleep(delay)
+            primeira = False
             linha = roteiro.pop(0)
             print(f"{PROMPT}{linha}")
         else:
@@ -107,7 +122,7 @@ async def conversar(conv: Conversation, conversation_id: str, mensagens: list[st
         await conv.handle(inbound, emit)
 
 
-async def run(script: Path | None = None, conversation_id: str | None = None) -> int:
+async def run(script: Path | None = None, conversation_id: str | None = None, delay: float = 0.0) -> int:
     try:
         conv = await montar_conversa()
     except BootError as exc:
@@ -121,7 +136,7 @@ async def run(script: Path | None = None, conversation_id: str | None = None) ->
         mensagens = [linha.strip() for linha in linhas if linha.strip() and not linha.startswith("#")]
 
     print(f"AutoSeguro — conversa {cid}. {AJUDA}\n")
-    await conversar(conv, cid, mensagens)
+    await conversar(conv, cid, mensagens, delay=delay)
     print(f"[log] {settings.log_dir / f'{cid}.jsonl'}")
     return 0
 
@@ -130,5 +145,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="agent.chat", description="Chat de terminal do agente AutoSeguro")
     parser.add_argument("--script", type=Path, help="arquivo com uma mensagem por linha (roda sem interação)")
     parser.add_argument("--conversation-id", help="id fixo da conversa (padrão: cli-<timestamp>)")
+    parser.add_argument(
+        "--delay",
+        type=float,
+        default=0.0,
+        help="segundos de espera entre as mensagens do --script (cota do LLM); padrão 0",
+    )
     args = parser.parse_args(argv)
-    return asyncio.run(run(script=args.script, conversation_id=args.conversation_id))
+    return asyncio.run(run(script=args.script, conversation_id=args.conversation_id, delay=args.delay))

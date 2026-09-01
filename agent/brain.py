@@ -11,8 +11,11 @@ exigir chave de API.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
+from collections.abc import Awaitable, Callable
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -60,6 +63,113 @@ def guard_price(text: str, state: LeadState) -> str:
         state.conversation_id,
         state.ultima_pergunta,
     )
+    return _fallback(state)
+
+
+# --------------------------------------------------------------------------- resiliência do LLM
+# O provedor de LLM é a MESMA classe de dependência instável que a `/quote`: a cota
+# gratuita do Gemini é 5 req/min e cada turno gasta 2 chamadas. Fato verificado no
+# agno 3.0.5 (`agno/agent/_run.py`): `Agent.retries` é 0 por padrão, então o SDK NÃO
+# re-tenta; e `arun` NÃO levanta — ele captura a exceção, marca
+# `run.status = RunStatus.error` e coloca `str(exc)` em `run.content`. Por isso aqui
+# se trata tanto a exceção quanto o run marcado como erro.
+MAX_TENTATIVAS_LLM = 4          # 1 chamada + 3 novas tentativas
+BUDGET_LLM_S = 30.0             # teto de espera somada; acima disso é melhor degradar
+_BACKOFF_S = (2.0, 4.0, 8.0)    # usado quando o provedor não diz o `retryDelay`
+
+# O 429 do Gemini chega como corpo JSON dentro da mensagem do `ModelProviderError`:
+# {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "details": [{... "retryDelay": "4s"}]}}
+_RETRY_DELAY_RE = re.compile(r"retryDelay['\"]?:\s*['\"]?(\d+(?:\.\d+)?)s")
+_CODE_RE = re.compile(r"['\"]?code['\"]?\s*:\s*(\d{3})")
+_STATUS_TRANSITORIOS = frozenset({408, 409, 429, 500, 502, 503, 504})
+_TEXTO_TRANSITORIO = re.compile(
+    r"RESOURCE_EXHAUSTED|UNAVAILABLE|DEADLINE_EXCEEDED|rate.?limit|quota|overloaded|timed?.?out|try again",
+    re.IGNORECASE,
+)
+
+class ChamadaLLMFalhou(RuntimeError):
+    """Erro do provedor, venha ele levantado ou lido de um run marcado como ERROR."""
+
+    def __init__(self, mensagem: str, status_code: int | None = None) -> None:
+        super().__init__(mensagem)
+        self.status_code = status_code
+
+
+def _status_do_erro(exc: BaseException) -> int | None:
+    """Status HTTP do erro: do atributo do agno ou do `"code"` no corpo da mensagem."""
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status
+    achado = _CODE_RE.search(str(exc))
+    return int(achado.group(1)) if achado else None
+
+
+def _e_transitorio(exc: BaseException) -> bool:
+    """Cota estourada, 5xx e timeout se re-tenta; 400/401/403 (erro nosso) não."""
+    status = _status_do_erro(exc)
+    if status is not None:
+        return status in _STATUS_TRANSITORIOS
+    if isinstance(exc, (TimeoutError, ConnectionError, asyncio.TimeoutError)):
+        return True
+    return bool(_TEXTO_TRANSITORIO.search(str(exc)))
+
+
+def _retry_delay(exc: BaseException) -> float | None:
+    """Espera pedida pelo provedor (`RetryInfo.retryDelay`), se ele disser."""
+    achado = _RETRY_DELAY_RE.search(str(exc))
+    return float(achado.group(1)) if achado else None
+
+
+async def _com_retry[T](
+    fn: Callable[[], Awaitable[T]],
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    max_tentativas: int = MAX_TENTATIVAS_LLM,
+    budget_s: float = BUDGET_LLM_S,
+    clock: Callable[[], float] = time.monotonic,
+    papel: str = "llm",
+) -> T:
+    """Repete `fn` enquanto a falha for transitória. Levanta a última exceção ao esgotar.
+
+    Respeita o `retryDelay` do provedor quando ele existe (é o tempo que ele mesmo
+    diz que a cota leva para liberar); senão, backoff 2 s → 4 s → 8 s.
+    """
+    inicio = clock()
+    tentativa = 1
+    while True:
+        try:
+            return await fn()
+        except Exception as exc:
+            if tentativa >= max_tentativas or not _e_transitorio(exc):
+                raise
+            espera = _retry_delay(exc)
+            if espera is None:
+                espera = _BACKOFF_S[min(tentativa, len(_BACKOFF_S)) - 1]
+            if clock() - inicio + espera > budget_s:
+                raise
+            log.warning(
+                "%s: falha transitória (%s) na tentativa %d/%d; aguardando %.1fs",
+                papel,
+                _status_do_erro(exc) or type(exc).__name__,
+                tentativa,
+                max_tentativas,
+                espera,
+            )
+            await sleep(espera)
+            tentativa += 1
+
+
+def _erro_do_run(run: Any) -> str | None:
+    """Mensagem de erro de um run que o agno marcou como ERROR (ele não levanta)."""
+    status = getattr(run, "status", None)
+    if str(getattr(status, "value", status) or "").upper() != "ERROR":
+        return None
+    conteudo = getattr(run, "content", None)
+    return conteudo if isinstance(conteudo, str) and conteudo else "erro sem detalhe do provedor"
+
+
+def _fallback(state: LeadState) -> str:
+    """Texto determinístico para o campo pendente — nunca deixa o turno sem resposta."""
     return FALLBACKS.get(state.ultima_pergunta or "", FALLBACK_PADRAO)
 
 
@@ -185,7 +295,19 @@ class Extractor:
     reprodutível e não se contamina com turnos antigos.
     """
 
-    def __init__(self, model_id: str | None = None, db_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        model_id: str | None = None,
+        db_path: Path | None = None,
+        *,
+        agent: Any | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._sleep = sleep
+        if agent is not None:      # dublê nos testes: não carrega o SDK nem exige chave
+            self._agent = agent
+            return
+
         from agno.agent import Agent
         from agno.db.sqlite import SqliteDb
         from agno.models.google import Gemini
@@ -208,25 +330,46 @@ class Extractor:
         )
 
     async def extract(self, text: str, state: LeadState, today: date) -> Extraction:
-        """Nunca levanta: falha de LLM vira `Extraction(intent=OUTRO)` marcada na observação."""
-        try:
+        """Nunca levanta. Cota estourada / 5xx re-tenta; esgotou, marca `indisponivel`."""
+
+        async def chamada() -> Extraction:
             run = await self._agent.arun(
                 text,
                 session_id=f"extract-{state.conversation_id}",
                 dependencies={"state": state, "today": today},
             )
+            erro = _erro_do_run(run)
+            if erro is not None:
+                raise ChamadaLLMFalhou(erro)
             if isinstance(run.content, Extraction):
                 return run.content
-            log.warning("extractor devolveu conteúdo fora do schema: %s", type(run.content).__name__)
+            # Sem status de erro e fora do schema: o modelo respondeu outra coisa.
+            # Não é transitório — re-tentar só queimaria cota.
+            raise ChamadaLLMFalhou(f"conteúdo fora do schema: {type(run.content).__name__}", status_code=422)
+
+        try:
+            return await _com_retry(chamada, sleep=self._sleep, papel="extractor")
         except Exception as exc:  # noqa: BLE001 — o turno continua sem extração
-            log.warning("extractor falhou: %s", type(exc).__name__)
-        return Extraction(intent=Intent.OUTRO, observacao="extracao_indisponivel")
+            log.warning("extractor indisponível (%s): %s", type(exc).__name__, str(exc)[:200])
+        return Extraction(intent=Intent.OUTRO, indisponivel=True, observacao="extracao_indisponivel")
 
 
 class Responder:
     """Agent conversacional: sem output_schema, com histórico por `session_id`."""
 
-    def __init__(self, model_id: str | None = None, db_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        model_id: str | None = None,
+        db_path: Path | None = None,
+        *,
+        agent: Any | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._sleep = sleep
+        if agent is not None:      # dublê nos testes
+            self._agent = agent
+            return
+
         from agno.agent import Agent
         from agno.db.sqlite import SqliteDb
         from agno.models.google import Gemini
@@ -250,13 +393,28 @@ class Responder:
         )
 
     async def reply(self, directive: str, state: LeadState, inbound_text: str) -> str:
-        run = await self._agent.arun(
-            inbound_text or "(sem texto)",
-            session_id=state.conversation_id,
-            dependencies={"state": state, "directive": directive},
-        )
-        texto = run.content if isinstance(run.content, str) else ""
-        return guard_price(texto.strip(), state)
+        """Nunca devolve vazio: LLM fora do ar cai no fallback determinístico do campo."""
+
+        async def chamada() -> str:
+            run = await self._agent.arun(
+                inbound_text or "(sem texto)",
+                session_id=state.conversation_id,
+                dependencies={"state": state, "directive": directive},
+            )
+            erro = _erro_do_run(run)
+            if erro is not None:
+                raise ChamadaLLMFalhou(erro)
+            texto = run.content.strip() if isinstance(run.content, str) else ""
+            if not texto:
+                raise ChamadaLLMFalhou("resposta vazia do modelo", status_code=422)
+            return texto
+
+        try:
+            texto = await _com_retry(chamada, sleep=self._sleep, papel="responder")
+        except Exception as exc:  # noqa: BLE001 — o lead não pode ficar sem resposta
+            log.warning("responder indisponível (%s): %s", type(exc).__name__, str(exc)[:200])
+            return _fallback(state)
+        return guard_price(texto, state)
 
 
 def _extractor_instructions(run_context: Any) -> str:

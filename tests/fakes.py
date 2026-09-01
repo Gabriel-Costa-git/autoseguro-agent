@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -215,3 +216,69 @@ def quote_recusa(motivo: str = "idade fora da faixa aceita") -> QuoteResult:
         attempts=[QuoteAttempt(attempt=1, status="recusa", http_status=422, latency_ms=48)],
         total_ms=48,
     )
+
+
+# --------------------------------------------------------------------------- agno / LLM
+# Corpo real do 429 do Gemini (free tier, 5 req/min), como ele chega em `str(exc)`
+# dentro do `ModelProviderError` e, por tabela, no `content` do run marcado ERROR.
+ERRO_429 = (
+    '{"error": {"code": 429, "message": "You exceeded your current quota, please check your plan and '
+    'billing details.", "status": "RESOURCE_EXHAUSTED", "details": [{"@type": '
+    '"type.googleapis.com/google.rpc.QuotaFailure", "violations": [{"quotaMetric": '
+    '"generativelanguage.googleapis.com/generate_content_free_tier_requests", "quotaId": '
+    '"GenerateRequestsPerMinutePerProjectPerModel-FreeTier", "quotaValue": "5"}]}, {"@type": '
+    '"type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "4s"}]}}'
+)
+ERRO_429_SEM_DELAY = '{"error": {"code": 429, "status": "RESOURCE_EXHAUSTED"}}'
+ERRO_400 = '{"error": {"code": 400, "message": "Invalid JSON payload", "status": "INVALID_ARGUMENT"}}'
+
+
+@dataclass
+class FakeRun:
+    """Espelho do `RunOutput` do agno no que o brain lê: `content` e `status`."""
+
+    content: Any = None
+    status: str = "COMPLETED"
+
+
+def run_erro(mensagem: str = ERRO_429) -> FakeRun:
+    """Run como o agno devolve quando o provedor falha: status ERROR e o erro no content."""
+    return FakeRun(content=mensagem, status="ERROR")
+
+
+class FakeAgnoAgent:
+    """Dublê do `agno.Agent`: consome um roteiro de runs (ou exceções) em `arun`."""
+
+    def __init__(self, respostas: list[Any]) -> None:
+        self.respostas = list(respostas)
+        self.chamadas: list[dict[str, Any]] = []
+
+    async def arun(self, entrada: Any, **kwargs: Any) -> Any:
+        self.chamadas.append({"entrada": entrada, **kwargs})
+        resposta = self.respostas.pop(0) if self.respostas else run_erro("roteiro do fake acabou")
+        if isinstance(resposta, Exception):
+            raise resposta
+        return resposta
+
+
+class SleepFake:
+    """`sleep` injetável que só anota quanto teria dormido."""
+
+    def __init__(self) -> None:
+        self.esperas: list[float] = []
+
+    async def __call__(self, segundos: float) -> None:
+        self.esperas.append(segundos)
+
+
+class ClockFake:
+    """Relógio monotônico falso: avança `passo` a cada leitura."""
+
+    def __init__(self, passo: float = 0.0) -> None:
+        self.passo = passo
+        self.agora = 0.0
+
+    def __call__(self) -> float:
+        atual = self.agora
+        self.agora += self.passo
+        return atual
