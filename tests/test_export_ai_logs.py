@@ -32,7 +32,8 @@ def test_load_env_secrets_le_valores_ignora_comentarios_e_vazias(tmp_path):
     valores = _load_env_secrets(env)
     assert "segredo-super-longo-123" in valores
     assert "outra-chave-longa" in valores
-    assert "3000" in valores
+    # PORT não tem nome de segredo nem tamanho de credencial: scrub cego destruiria os transcripts
+    assert "3000" not in valores
 
 
 def test_load_env_secrets_arquivo_ausente_devolve_vazio(tmp_path):

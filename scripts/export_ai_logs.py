@@ -28,6 +28,8 @@ MAESTRO_DIR = CLAUDE_PROJECTS_DIR / "-workspace-autoseguro-agent"
 EXECUTOR_DIRS_GLOB = "-workspace-autoseguro-agent--exec-roles-*"
 
 _GOOGLE_KEY_RE = re.compile(r"(?:AIza[0-9A-Za-z_-]{30,}|AQ\.[0-9A-Za-z_-]{30,})")
+_SECRET_NAME_RE = re.compile(r"KEY|SECRET|TOKEN|PASS|PWD|CREDENTIAL", re.IGNORECASE)
+_SECRET_MIN_LEN = 12
 _APIKEY_RE = re.compile(r"apikey[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9_-]{16,}", re.IGNORECASE)
 _EMAIL_COUNT_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 
@@ -57,9 +59,12 @@ def _load_env_secrets(env_path: Path) -> list[str]:
         linha = linha.strip()
         if not linha or linha.startswith("#") or "=" not in linha:
             continue
-        _, _, valor = linha.partition("=")
+        nome, _, valor = linha.partition("=")
         valor = valor.strip().strip('"').strip("'")
-        if valor:
+        # Só o que é segredo de verdade: nome com cara de credencial E valor com tamanho
+        # de credencial. Valores curtos/config (porta, modelo, "logs") apareceriam em todo
+        # lugar dos transcripts e o scrub cego os destruiria (44k substituições numa rodada).
+        if valor and _SECRET_NAME_RE.search(nome.strip()) and len(valor) >= _SECRET_MIN_LEN:
             valores.add(valor)
     return sorted(valores, key=len, reverse=True)
 
