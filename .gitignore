@@ -5,3 +5,4 @@ __pycache__/
 .env
 logs/*.jsonl
 !logs/.gitkeep
+data/
