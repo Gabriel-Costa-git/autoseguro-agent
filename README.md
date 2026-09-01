@@ -20,7 +20,7 @@ cp .env.example .env            # preencha GOOGLE_API_KEY (Gemini)
 
 # 3. Conversa no terminal (gera logs/<conversation_id>.jsonl)
 uv run python -m agent.chat
-uv run python -m agent.chat --script scripts/roteiro-feliz.txt   # roteiro sem interação
+uv run python -m agent.chat --script scripts/roteiro-feliz.txt --delay 15   # roteiro sem interação
 
 # 4. Testes (sem rede, sem LLM, sem docker)
 uv run pytest -q
@@ -158,10 +158,18 @@ Foi usado para tom, fluxo, taxonomia de objeções e padrões de PII. Os timesta
 monotônicos; a ordem correta é `message_index`.
 
 ### 8. Framework e modelo
-agno 3.x com Gemini (`gemini-2.5-flash`) faz duas coisas: extração com saída estruturada
+agno 3.x com Gemini (`gemini-3.5-flash-lite`, configurável por `GEMINI_MODEL`) faz duas coisas: extração com saída estruturada
 (sem histórico, temperatura 0, contexto e última pergunta no prompt para desambiguar
 "sim"/"35"/"2019") e resposta conversacional com histórico por sessão em SQLite. Tudo que
 decide está fora do framework, em Python puro, para ser testável e trocável.
+
+O provedor de LLM é **outra dependência instável**, e foi tratado como a `/quote`: a primeira
+rodada real estourou a cota gratuita do Gemini (5 req/min e 20 req/dia no `gemini-2.5-flash`),
+o agno não re-tenta por conta própria e devolve o erro dentro do `RunOutput` em vez de levantar.
+Por isso `brain.py` tem retry que honra o `retryDelay` do provedor (backoff 2/4/8 s quando ele
+não diz, até 3 novas tentativas, 30 s de orçamento) e degradação honesta: extração indisponível
+vira "não consegui ler sua mensagem, pode repetir?" em vez de repetir a última pergunta, e três
+seguidas escalam para humano. O CLI tem `--delay` para roteiros dentro da cota gratuita.
 
 ### 9. Canal é adaptador
 O núcleo expõe `Conversation.handle(inbound, emit)`. O CLI é o canal de desenvolvimento e
