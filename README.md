@@ -69,7 +69,8 @@ canal (CLI | Evolution) ──Inbound──▶ conversation.handle
 | `agent/channels/cli.py`, `agent/channels/evolution.py` | Adaptadores de canal (terminal e WhatsApp). |
 | `scripts/export_ai_logs.py` | Exporta e higieniza as sessões de IA para `ai-logs/`. |
 | `agent/runtime_config.py`, `agent/defaults.py`, `config/` | Textos e parâmetros editáveis com versões, overrides e hot-reload (Studio). |
-| `agent/studio/` | Studio local: Lab, Prompts, Tools, Config (FastAPI + estático, só 127.0.0.1). |
+| `agent/takeover.py`, `agent/atendimentos.py` | Quem responde cada conversa (`config/atendimentos.json`, lido também pelo `serve.py`) e o catálogo de atendimentos lido dos logs. |
+| `agent/studio/` | Studio local: Atendimentos, Lab (Conversa · Prompts · Tools) e Config (FastAPI + estático, só 127.0.0.1). |
 
 ## Decisões e porquês
 
@@ -160,7 +161,8 @@ Foi usado para tom, fluxo, taxonomia de objeções e padrões de PII. Os timesta
 monotônicos; a ordem correta é `message_index`.
 
 ### 8. Framework e modelo
-agno 3.x com Gemini (`gemini-3.5-flash-lite`, configurável por `GEMINI_MODEL`) faz duas coisas: extração com saída estruturada
+agno 3.x com Gemini (`gemini-3.5-flash-lite`, escolhido no seletor da aba Config do Studio e gravado
+em `config/settings.json`; `GEMINI_MODEL` no `.env` continua valendo como fallback) faz duas coisas: extração com saída estruturada
 (sem histórico, temperatura 0, contexto e última pergunta no prompt para desambiguar
 "sim"/"35"/"2019") e resposta conversacional com histórico por sessão em SQLite. Tudo que
 decide está fora do framework, em Python puro, para ser testável e trocável.
@@ -237,20 +239,32 @@ scripts/quote_api_falha.sh             # opcional: API de cotação com falha fo
 Painel de operador, só em `127.0.0.1`, fora do canal Evolution (`agent/serve.py` não sabe que
 ele existe). Tema dark, sem framework, sem bundler e sem nada vindo de CDN: HTML, CSS e dois
 módulos ES servidos do disco. Uma barra superior de 56 px carrega a marca, o breadcrumb
-(`Prompts / <slot>`, `Lab / <sessão>`) e as quatro abas como links segmentados, com o
-indicador de saúde à direita; o hash da URL (`#lab`, `#prompts`, `#tools`, `#config`) é quem
-manda. Lab e "Testar prompt" dividem o mesmo componente de chat e a MESMA sessão do Lab —
-uma por aba do navegador, que sobrevive ao reload em vez de abrir outra. Quatro abas:
+(`Atendimentos / <conversa>`, `Lab / Prompts / <slot>`) e as três abas de topo como links
+segmentados, com o indicador de saúde à direita; o hash da URL (`#atendimentos`,
+`#lab/conversa`, `#lab/prompts`, `#lab/tools`, `#config`) é quem manda, e a tela inicial é
+`#atendimentos`. Prompts e Tools são ferramentas do Lab — o workbench do agente —, então são
+sub-abas dele, não abas de topo. Lab e "Testar prompt" dividem o mesmo componente de chat e a
+MESMA sessão do Lab — uma por aba do navegador, que sobrevive ao reload em vez de abrir outra.
 
-- **Lab** — conversa como lead usando o mesmo `Conversation.handle` da entrega (nunca uma
+- **Atendimentos** — a visão de operação: todas as conversas reais do agente numa lista só,
+  ordenadas pela última mensagem. Cada linha traz a **origem** do lead (`whatsapp:<instância>`,
+  `cli` ou `lab`), o status (`agente`, `humano`, `encerrado`), a etapa, a última mensagem e o
+  tempo relativo; filtros por origem, status e busca. Abrir uma conversa mostra a transcrição,
+  os eventos e o estado reconstruído do log. **Assumir** passa a conversa para o operador: o
+  agente para de responder aquele lead na hora (o webhook só registra o `inbound` com
+  `modo="humano"`) e o composer libera o envio pela Evolution, que entra no log como `outbound`
+  com `source="humano"`. **Devolver ao agente** desfaz. Só conversas de WhatsApp (`wa-*`) podem
+  receber mensagem do operador — Lab e CLI não têm para onde enviar.
+- **Lab · Conversa** — conversa como lead usando o mesmo `Conversation.handle` da entrega (nunca uma
   cópia). O chat ocupa o centro (bolhas do lead à direita, do agente à esquerda com a etiqueta
-  `template`/`llm`) e o painel de 380 px à direita tem três sub-abas: **Eventos** ao vivo do
+  `template`/`llm`) e o painel de 380 px à direita tem três painéis: **Eventos** ao vivo do
   turno (extração, decisão da policy, cada tentativa da `/quote` com status e latência, ViaCEP,
   handoff), **Contexto** — o payload exato de cada chamada ao modelo, com as instruções
   renderizadas, o histórico enviado, a entrada e a saída — e **Estado**, o `LeadState` da
-  sessão. Clicar numa bolha seleciona o turno. Na barra do chat, o seletor de API de cotação
-  (docker na 8000, falha forçada na 8001) mostra a URL em uso pela sessão.
-- **Prompts** — uma página de editor: dropdown de slot com busca (`/` foca) e itens agrupados,
+  sessão. Clicar numa bolha seleciona o turno. Na barra do chat ficam o seletor de API de
+  cotação (docker na 8000, falha forçada na 8001), que mostra a URL em uso pela sessão, e o
+  seletor de modelo, com a mesma lista da aba Config.
+- **Lab · Prompts** — uma página de editor: dropdown de slot com busca (`/` foca) e itens agrupados,
   dropdown de versão, selo `Ativa`/`Rascunho`/`Default · imutável`, e os botões **Ativar** e
   **Salvar** (`Cmd/Ctrl+S`). O corpo alterna entre editor mono, preview de markdown e os dois
   lado a lado; os chips dos placeholders do slot inserem `{campo}` no cursor, e *Diff vs
@@ -259,14 +273,18 @@ uma por aba do navegador, que sobrevive ao reload em vez de abrir outra. Quatro 
   fallbacks anti-preço, textos da policy, templates do presenter (cotação, planos, recusa,
   handoff por motivo) e textos da orquestração. Salvar aplica na hora, sem reiniciar. No rodapé,
   **Testar prompt** abre o chat do Lab embutido para conversar sem trocar de aba.
-- **Tools** — ficha de cada componente, em grade de dois campos por linha: `quote_client`
+- **Lab · Tools** — ficha de cada componente, em grade de dois campos por linha: `quote_client`
   (endpoints, timeout, tentativas, orçamento, backoff), ViaCEP (liga/desliga, URL, timeout),
   policy (limites de estagnação, tentativas de CEP, objeções até handoff) e regras
   (pré-validação local liga/desliga). Cada campo mostra a origem do valor efetivo em um selo
   (`default`, `env:VAR`, `override`) e, quando há override, um botão para voltar ao padrão.
 - **Config** — mesma ficha para os `settings`: modelo do Gemini, janela de contexto do
   Responder (quantas mensagens do histórico vão em cada chamada; o Extractor é sem histórico
-  por desenho), temperaturas, retry do LLM, delay do roteiro e caminho do banco de sessão.
+  por desenho), temperaturas, retry do LLM, delay do roteiro e caminho do banco de sessão. O
+  modelo é um **seletor** com botão **Atualizar modelos**, que consulta a API do Google
+  (`models.list`, só os que fazem `generateContent`) e guarda a lista em `config/models.json`;
+  a mesma lista aparece na barra do chat do Lab. Escolher grava override em
+  `config/settings.json` e vale no próximo turno, sem reiniciar.
 
 Como isso não altera o comportamento entregue:
 
@@ -276,7 +294,11 @@ Como isso não altera o comportamento entregue:
   origem de cada valor. Sem override, o agente é exatamente o da entrega.
 - `tests/test_golden_textos.py` compara 26 saídas reais (todas as mensagens do presenter, os
   prompts renderizados) com snapshots gerados do código entregue antes do refactor.
-- Hot-reload por `mtime`: nada é lido no import, todo consumidor lê o store na chamada.
+- Atendimentos é **só leitura de log** — a fonte é `logs/*.jsonl` e `logs/studio/*.jsonl`, e
+  `logs/entrega/` fica de fora. Quem responde cada conversa está em `config/atendimentos.json`:
+  arquivo ausente ou vazio = o agente responde tudo, exatamente como na entrega.
+- Hot-reload por `mtime`: nada é lido no import, todo consumidor lê o store na chamada. Vale
+  também para o takeover, que é escrito pelo Studio e lido pelo `serve.py` — outro processo.
 - `guard_price` não tem toggle. A formatação de preço e as listas continuam em código; os
   templates só recebem valores já formatados vindos da API.
 
@@ -285,3 +307,8 @@ Como isso não altera o comportamento entregue:
   Redis/DB.
 - Um plano por cotação: o agente pergunta o plano antes de cotar. Trocar de plano recota.
 - A Evolution API usa protocolo não oficial (Baileys); há risco de bloqueio do número.
+- Ao **devolver ao agente** uma conversa assumida, o Responder não viu a troca humana: o
+  histórico do agno só tem o que o próprio agente falou. Ele retoma do `LeadState`, então pode
+  repetir algo que o operador já resolveu no meio.
+- O Studio **envia** pela Evolution quando o operador assume, mas não recebe webhook: as
+  respostas do lead continuam chegando pelo `serve.py`, que as registra sem chamar o agente.
