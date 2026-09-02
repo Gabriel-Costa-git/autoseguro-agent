@@ -183,7 +183,7 @@ def test_put_config_valor_invalido_400(client: TestClient):
 def test_get_raiz_serve_index(client: TestClient):
     resp = client.get("/")
     assert resp.status_code == 200
-    assert "<div id=\"app\">" in resp.text
+    assert 'id="app"' in resp.text
 
 
 def test_health(client: TestClient):

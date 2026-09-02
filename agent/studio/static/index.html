@@ -2,9 +2,116 @@
 <html lang="pt-BR">
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AutoSeguro Studio</title>
+    <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app" class="shell">
+      <nav class="sidebar">
+        <div class="brand">AutoSeguro<br /><span>Studio</span></div>
+        <ul class="tabs" id="tabs">
+          <li><a href="#lab" data-tab="lab">Lab</a></li>
+          <li><a href="#prompts" data-tab="prompts">Prompts</a></li>
+          <li><a href="#tools" data-tab="tools">Tools</a></li>
+          <li><a href="#config" data-tab="config">Config</a></li>
+        </ul>
+        <div class="sidebar-footer">
+          <div>Studio · 127.0.0.1</div>
+          <div class="health">
+            <span id="health-dot" class="health-dot"></span>
+            <span id="health-text">checando...</span>
+          </div>
+        </div>
+      </nav>
+
+      <main class="content">
+        <!-- ------------------------------------------------------------ LAB -->
+        <section id="tab-lab" class="tab-panel" hidden>
+          <h2 class="tab-title">Lab</h2>
+          <div class="lab-topbar">
+            <label class="field">
+              API de cotação
+              <select id="lab-api-select"></select>
+            </label>
+            <label class="field">
+              URL livre
+              <input id="lab-api-custom" type="text" placeholder="http://localhost:8000" />
+            </label>
+            <button id="lab-new-session" class="primary" type="button">Nova sessão</button>
+            <span id="lab-session-id" class="muted"></span>
+          </div>
+
+          <div id="lab-unavailable" class="notice warn" hidden>Lab indisponível.</div>
+
+          <div id="lab-body" class="lab-columns">
+            <div class="lab-col lab-chat">
+              <h3>Chat</h3>
+              <div id="lab-messages" class="messages"></div>
+              <div id="lab-typing" class="typing" hidden>digitando…</div>
+              <div class="chat-input-row">
+                <label class="field" style="flex:1">
+                  <span class="muted" style="display:none">Mensagem</span>
+                  <input id="lab-input" type="text" placeholder="Mensagem..." disabled />
+                </label>
+                <button id="lab-send" type="button" disabled>Enviar</button>
+                <button id="lab-audio" type="button" disabled>Áudio (mídia)</button>
+              </div>
+            </div>
+
+            <div class="lab-col lab-events">
+              <h3>Eventos ao vivo</h3>
+              <div id="lab-events-list" class="events-list"></div>
+            </div>
+
+            <div class="lab-col lab-context">
+              <h3>Contexto</h3>
+              <div id="lab-context-body" class="context-body">
+                <p class="muted">Selecione um turno (bolha do lead) para ver o contexto.</p>
+              </div>
+            </div>
+          </div>
+
+          <details id="lab-state-panel" class="state-panel">
+            <summary>Estado</summary>
+            <pre id="lab-state-json">(sem sessão)</pre>
+          </details>
+        </section>
+
+        <!-- ------------------------------------------------------------ PROMPTS -->
+        <section id="tab-prompts" class="tab-panel" hidden>
+          <h2 class="tab-title">Prompts</h2>
+          <div class="prompts-layout">
+            <div class="prompts-list-col">
+              <label class="field">
+                Buscar
+                <input id="prompts-search" type="text" placeholder="Buscar slot..." />
+              </label>
+              <div id="prompts-list" class="slot-list"></div>
+            </div>
+            <div class="prompts-detail-col" id="prompts-detail">
+              <p class="muted">Selecione um slot à esquerda.</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- ------------------------------------------------------------ TOOLS -->
+        <section id="tab-tools" class="tab-panel" hidden>
+          <h2 class="tab-title">Tools</h2>
+          <p class="notice">guard_price não é configurável por regra.</p>
+          <div id="tools-cards" class="cards-grid"></div>
+        </section>
+
+        <!-- ------------------------------------------------------------ CONFIG -->
+        <section id="tab-config" class="tab-panel" hidden>
+          <h2 class="tab-title">Config</h2>
+          <div id="config-card" class="card"></div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+
+    <script type="module" src="/static/app.js"></script>
   </body>
 </html>
