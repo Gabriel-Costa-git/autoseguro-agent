@@ -341,6 +341,49 @@ async def test_log_jsonl_tem_a_trilha_completa_do_turno(tmp_path):
     assert next(e for e in eventos if e["event"] == "llm_call")["data"]["papel"] == "extractor"
 
 
+# --------------------------------------------------------------------------- origem
+@pytest.mark.asyncio
+async def test_origem_do_canal_entra_no_state_e_no_log(tmp_path):
+    """O canal diz de onde veio o lead; o turno guarda no estado e no evento `inbound`."""
+    conv, deps = montar(tmp_path, [lambda s, e: (s, [])], extracoes=[Extraction()])
+
+    async def emit(_out):
+        return None
+
+    await conv.handle(
+        Inbound(conversation_id="c-teste", message_id="m1", text="oi", origem="whatsapp:corretora", sender_name="Ana"),
+        emit,
+    )
+
+    assert conv.store.get("c-teste").origem == "whatsapp:corretora"
+    evento = next(e for e in deps["logger"].eventos() if e["event"] == "inbound")
+    assert evento["data"]["origem"] == "whatsapp:corretora"
+    assert evento["data"]["sender_name"] == "Ana"
+
+
+@pytest.mark.asyncio
+async def test_origem_e_a_do_primeiro_contato(tmp_path):
+    """Mensagem seguinte sem origem (canal antigo, replay) não apaga a que já está no estado."""
+    conv, _ = montar(tmp_path, [lambda s, e: (s, []), lambda s, e: (s, [])], extracoes=[Extraction(), Extraction()])
+
+    async def emit(_out):
+        return None
+
+    await conv.handle(Inbound(conversation_id="c-teste", message_id="m1", text="oi", origem="cli"), emit)
+    await conv.handle(Inbound(conversation_id="c-teste", message_id="m2", text="35"), emit)
+
+    assert conv.store.get("c-teste").origem == "cli"
+
+
+@pytest.mark.asyncio
+async def test_sem_origem_o_campo_fica_none(tmp_path):
+    """Comportamento entregue: canal que não informa origem continua funcionando igual."""
+    conv, deps = montar(tmp_path, [lambda s, e: (s, [])], extracoes=[Extraction()])
+    state, _ = await falar(conv, "oi", 1)
+    assert state.origem is None
+    assert next(e for e in deps["logger"].eventos() if e["event"] == "inbound")["data"]["origem"] is None
+
+
 # --------------------------------------------------------------------------- integração real
 # Aqui só o LLM é dublê: policy, presenter, rules, QuoteClient, cep e logger são os reais,
 # com httpx.MockTransport no lugar da rede. É o teste que prova que as peças se encaixam.

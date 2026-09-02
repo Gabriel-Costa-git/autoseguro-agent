@@ -152,6 +152,7 @@ def resumir_state(state: LeadState | None) -> dict[str, Any]:
         }
     dados = {
         "conversation_id": state.conversation_id,
+        "origem": state.origem,
         "stage": state.stage.value,
         "lead_nome": state.lead_nome,
         "idade": state.idade,
@@ -218,6 +219,7 @@ class LabManager:
                 message_id=f"m{sessao.turnos}",
                 text=text,
                 media_type=media_type,
+                origem="lab",
             )
             state = await sessao.conversation.handle(inbound, emit)
         return {

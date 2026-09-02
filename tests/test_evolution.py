@@ -7,13 +7,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
 
+from agent.channels import evolution as evolution_mod
 from agent.channels.evolution import EvolutionSender, build_app, parse_webhook
 from agent.models import Inbound, LeadState, Outbound
+from agent.takeover import TakeoverStore
 
 
 def _payload(
@@ -57,6 +60,31 @@ def test_parse_webhook_texto_simples():
     assert inbound.text == "Quero cotar meu carro"
     assert inbound.media_type == "text"
     assert inbound.sender_name == "Fulano"
+
+
+def test_parse_webhook_origem_vem_da_instancia_do_payload():
+    """Uma Evolution serve várias instâncias: a origem tem de dizer QUAL atendeu o lead."""
+    inbound = parse_webhook(_payload(texto="oi"))
+    assert inbound is not None
+    assert inbound.origem == "whatsapp:minha-instancia"
+
+
+def test_parse_webhook_origem_cai_para_a_instancia_do_env(monkeypatch):
+    monkeypatch.setattr(evolution_mod, "settings", SimpleNamespace(evolution_instance="do-env"))
+    payload = _payload(texto="oi")
+    del payload["instance"]
+    inbound = parse_webhook(payload)
+    assert inbound is not None
+    assert inbound.origem == "whatsapp:do-env"
+
+
+def test_parse_webhook_sem_instancia_em_lugar_nenhum(monkeypatch):
+    monkeypatch.setattr(evolution_mod, "settings", SimpleNamespace(evolution_instance=None))
+    payload = _payload(texto="oi")
+    del payload["instance"]
+    inbound = parse_webhook(payload)
+    assert inbound is not None
+    assert inbound.origem == "whatsapp"
 
 
 def test_parse_webhook_extended_text():
@@ -272,3 +300,68 @@ async def test_duas_mensagens_do_mesmo_lead_sao_serializadas_em_ordem():
     assert resp1.status_code == 200
     assert resp2.status_code == 200
     assert conversation.ordem == [("start", "m1"), ("end", "m1"), ("start", "m2"), ("end", "m2")]
+
+
+# --------------------------------------------------------------------------- takeover
+def _com_takeover(tmp_path, monkeypatch, assumidas: list[str]):
+    """App com `TakeoverStore` real em `tmp_path/config` e log em `tmp_path/logs`."""
+    monkeypatch.setattr(
+        evolution_mod,
+        "settings",
+        SimpleNamespace(log_dir=tmp_path / "logs", evolution_instance="minha-instancia"),
+    )
+    takeover = TakeoverStore(tmp_path / "config")
+    for cid in assumidas:
+        takeover.assumir(cid)
+    sender, chamadas = _sender_mudo()
+    conversation = FakeConversation()
+    return build_app(conversation, sender, takeover=takeover), conversation, chamadas
+
+
+@pytest.mark.asyncio
+async def test_webhook_em_modo_humano_nao_chama_o_agente_e_loga_inbound(tmp_path, monkeypatch):
+    app, conversation, chamadas = _com_takeover(tmp_path, monkeypatch, ["wa-5511999999999"])
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/webhook", json=_payload(texto="oi, tem alguém aí?"))
+
+    assert resp.status_code == 200
+    assert conversation.recebidos == []        # o agente não respondeu
+    assert chamadas == []                      # nem mandou nada pelo WhatsApp
+
+    linhas = (tmp_path / "logs" / "wa-5511999999999.jsonl").read_text(encoding="utf-8").splitlines()
+    evento = json.loads(linhas[0])
+    assert evento["event"] == "inbound"
+    assert evento["message_id"] == "3EB0ABC"
+    assert evento["data"] == {
+        "text": "oi, tem alguém aí?",
+        "media_type": "text",
+        "sender_name": "Fulano",
+        "origem": "whatsapp:minha-instancia",
+        "modo": "humano",
+    }
+
+
+@pytest.mark.asyncio
+async def test_webhook_com_takeover_de_outro_lead_segue_normal(tmp_path, monkeypatch):
+    app, conversation, chamadas = _com_takeover(tmp_path, monkeypatch, ["wa-5511000000000"])
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/webhook", json=_payload(texto="quero cotar"))
+
+    assert [i.text for i in conversation.recebidos] == ["quero cotar"]
+    assert [c["path"] for c in chamadas if c["path"].startswith("/message/sendText/")]
+    assert not (tmp_path / "logs").exists()    # quem loga o turno é a Conversation (aqui, falsa)
+
+
+@pytest.mark.asyncio
+async def test_devolver_volta_a_chamar_o_agente(tmp_path, monkeypatch):
+    app, conversation, _ = _com_takeover(tmp_path, monkeypatch, ["wa-5511999999999"])
+    takeover = TakeoverStore(tmp_path / "config")
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/webhook", json=_payload(texto="oi", message_id="m1"))
+        takeover.devolver("wa-5511999999999")          # operador devolve, sem reiniciar o processo
+        await client.post("/webhook", json=_payload(texto="e aí", message_id="m2"))
+
+    assert [i.text for i in conversation.recebidos] == ["e aí"]

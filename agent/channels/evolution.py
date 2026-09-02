@@ -10,6 +10,11 @@ concorrentes (senão a `Conversation` leria/gravaria o mesmo `LeadState` em para
 `EvolutionSender` é o lado de saída: manda texto e o indicador "digitando". Erro
 de envio vira log, nunca exceção — um WhatsApp fora do ar não pode derrubar o
 processamento do lead (o estado já avançou; só a entrega falhou).
+
+`takeover` (opcional) é o interruptor "quem responde este lead": quando o operador
+assume a conversa no Studio, a mensagem que chega vira só um evento `inbound` com
+`modo="humano"` no log e o agente NÃO é chamado. Sem `takeover` (padrão), o
+comportamento é exatamente o entregue.
 """
 from __future__ import annotations
 
@@ -23,7 +28,9 @@ from typing import Any
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Request
 
+from agent.config import settings
 from agent.models import Inbound, MediaType, Outbound
+from agent.observability import ConversationLogger
 
 log = logging.getLogger("autoseguro.evolution")
 
@@ -55,6 +62,12 @@ def _texto(message: dict[str, Any]) -> str | None:
     return None
 
 
+def _origem(payload: dict[str, Any]) -> str:
+    """`whatsapp:<instância>`: a instância do payload (uma Evolution serve várias) ou a do `.env`."""
+    instancia = payload.get("instance") or settings.evolution_instance
+    return f"whatsapp:{instancia}" if instancia else "whatsapp"
+
+
 def parse_webhook(payload: dict[str, Any]) -> Inbound | None:
     """`None` para o que não vira turno: evento diferente, grupo, eco do próprio agente, sem `data`."""
     if payload.get("event") != "messages.upsert":
@@ -83,6 +96,7 @@ def parse_webhook(payload: dict[str, Any]) -> Inbound | None:
         text=_texto(message),
         media_type=_media_type(message),
         sender_name=data.get("pushName"),
+        origem=_origem(payload),
         ts=datetime.fromtimestamp(int(ts), tz=UTC) if ts is not None else datetime.now(UTC),
     )
 
@@ -133,8 +147,24 @@ def _number_from_conversation_id(conversation_id: str) -> str:
     return conversation_id.removeprefix("wa-")
 
 
-def build_app(conversation: Any, sender: EvolutionSender) -> FastAPI:
-    """`conversation` só precisa expor `async handle(inbound, emit)` (o Protocol de `Conversation`)."""
+def _logar_modo_humano(inbound: Inbound) -> None:
+    """Conversa assumida por um humano: a mensagem entra no log e para por aí."""
+    ConversationLogger(settings.log_dir, inbound.conversation_id).event(
+        "inbound",
+        message_id=inbound.message_id,
+        text=inbound.text,
+        media_type=inbound.media_type,
+        sender_name=inbound.sender_name,
+        origem=inbound.origem,
+        modo="humano",
+    )
+
+
+def build_app(conversation: Any, sender: EvolutionSender, takeover: Any = None) -> FastAPI:
+    """`conversation` só precisa expor `async handle(inbound, emit)` (o Protocol de `Conversation`).
+
+    `takeover` só precisa expor `is_humano(conversation_id) -> bool` (`agent.takeover.TakeoverStore`).
+    """
     app = FastAPI(title="AutoSeguro — webhook Evolution")
     locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
@@ -145,6 +175,11 @@ def build_app(conversation: Any, sender: EvolutionSender) -> FastAPI:
             await sender.send_text(number, out.text)
 
         async with locks[inbound.conversation_id]:
+            # A checagem fica DENTRO do lock: assumir/devolver no meio de um turno em voo
+            # não pode fazer o agente e o operador responderem a mesma mensagem.
+            if takeover is not None and takeover.is_humano(inbound.conversation_id):
+                _logar_modo_humano(inbound)
+                return
             await conversation.handle(inbound, emit)
 
     @app.post("/webhook")

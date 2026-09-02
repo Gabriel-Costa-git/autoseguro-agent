@@ -1,10 +1,16 @@
-"""API HTTP do Studio: prompts (versões/ativação), overrides de tools/settings e o valor
-efetivo de cada parâmetro. A sessão de teste (Lab) é do executor C — este módulo só monta
-o router dela se `agent.studio.lab` já existir (import tolerante) e expõe `store` e
-`conversation_factory` em `app.state` pra ela usar.
+"""API HTTP do Studio: prompts (versões/ativação), overrides de tools/settings, o valor
+efetivo de cada parâmetro, o catálogo de modelos do Gemini e as rotas de Atendimentos
+(`agent/studio/atendimentos_api.py`). A sessão de teste (Lab) mora em `agent/studio/lab.py`
+e é montada aqui se o módulo existir (import tolerante).
 
-Regra de ouro deste módulo: ele NUNCA decide comportamento — só lê/escreve o `ConfigStore`
-(`agent/runtime_config.py`) e traduz `ConfigError` em 400, slot/versão ausente em 404.
+`app.state` é o ponto de injeção de tudo o que os routers usam: `store`,
+`conversation_factory`, `takeover`, `catalogo`, `evolution_sender` e
+`models_client_factory` — os testes trocam qualquer um deles sem mexer na assinatura de
+`build_studio_app`.
+
+Regra de ouro deste módulo: ele NUNCA decide comportamento do agente — só lê/escreve o
+`ConfigStore` (`agent/runtime_config.py`), lê os logs pelo `Catalogo` e traduz
+`ConfigError` em 400, coisa inexistente em 404.
 """
 from __future__ import annotations
 
@@ -17,8 +23,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from agent.atendimentos import Catalogo
+from agent.config import settings
 from agent.runtime_config import ConfigError, ConfigStore, PromptSlot
 from agent.runtime_config import store as _singleton_store
+from agent.studio import models_catalog
+from agent.studio.atendimentos_api import construir_router as construir_atendimentos
+from agent.takeover import TakeoverStore
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -84,6 +95,12 @@ def build_studio_app(
     app = FastAPI(title="AutoSeguro Studio")
     app.state.store = store
     app.state.conversation_factory = conversation_factory
+    # Takeover e catálogo moram no mesmo lugar que o canal usa: `config/` do store injetado
+    # e `logs/`. Nada é lido aqui — só na chamada da rota (hot-reload e testes com tmp_path).
+    app.state.takeover = TakeoverStore(store.dir)
+    app.state.catalogo = Catalogo(settings.log_dir, takeover=app.state.takeover)
+    app.state.evolution_sender = None
+    app.state.models_client_factory = None
 
     # ------------------------------------------------------------ prompts
     @app.get("/api/prompts")
@@ -169,6 +186,31 @@ def build_studio_app(
         except ConfigError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return _overrides_planas(store.snapshot()["settings"])
+
+    # ------------------------------------------------------------ catálogo de modelos
+    def _catalogo_modelos(dados: dict[str, Any] | None) -> dict[str, Any]:
+        """Sem cache, a única opção honesta é o modelo que o agente está usando agora."""
+        if dados and dados.get("modelos"):
+            return {"modelos": dados["modelos"], "atualizado_em": dados.get("atualizado_em"), "cache": True}
+        atual = store.param("settings.gemini_model")
+        return {"modelos": [{"id": atual, "nome": atual}], "atualizado_em": None, "cache": False}
+
+    @app.get("/api/models")
+    def listar_modelos() -> dict[str, Any]:
+        return _catalogo_modelos(models_catalog.listar(store.dir))
+
+    @app.post("/api/models/refresh")
+    def atualizar_modelos() -> dict[str, Any]:
+        try:
+            dados = models_catalog.atualizar(
+                store.dir, settings.google_api_key, client_factory=app.state.models_client_factory
+            )
+        except models_catalog.ModelsError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _catalogo_modelos(dados)
+
+    # ------------------------------------------------------------ atendimentos
+    app.include_router(construir_atendimentos())
 
     # ------------------------------------------------------------ saúde + lab (se já existir)
     @app.get("/api/health")

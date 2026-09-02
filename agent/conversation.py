@@ -126,6 +126,9 @@ class Conversation:
         state = self.store.get(inbound.conversation_id) or LeadState(conversation_id=inbound.conversation_id)
         if inbound.sender_name and not state.lead_nome:
             state.lead_nome = inbound.sender_name.split()[0]
+        # A origem é do primeiro contato: o canal que abriu a conversa manda, e uma mensagem
+        # sem origem (canal antigo, replay) não apaga a que já está no estado.
+        state.origem = state.origem or inbound.origem
         turno = _Turno(
             inbound=inbound,
             emit=emit,
@@ -138,6 +141,7 @@ class Conversation:
             text=inbound.text,
             media_type=inbound.media_type,
             sender_name=inbound.sender_name,
+            origem=state.origem,
         )
         try:
             extraction = await self._extrair(state, turno)

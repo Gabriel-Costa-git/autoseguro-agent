@@ -14,6 +14,8 @@ import uvicorn
 from agent.channels.cli import BootError, montar_conversa
 from agent.channels.evolution import EvolutionSender, build_app
 from agent.config import settings
+from agent.runtime_config import CONFIG_DIR
+from agent.takeover import TakeoverStore
 
 
 def _exigir_settings() -> None:
@@ -48,7 +50,9 @@ def run() -> int:
         apikey=settings.evolution_apikey,  # type: ignore[arg-type]
         instance=settings.evolution_instance,  # type: ignore[arg-type]
     )
-    app = build_app(conversation, sender)
+    # Conversa assumida por um humano no painel do operador não passa pelo agente.
+    # Sem `config/atendimentos.json` (o caso normal) o mapa é vazio e nada muda.
+    app = build_app(conversation, sender, takeover=TakeoverStore(CONFIG_DIR))
 
     porta = int(os.getenv("PORT", "3000"))
     uvicorn.run(app, host="0.0.0.0", port=porta)

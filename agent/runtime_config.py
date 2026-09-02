@@ -30,6 +30,11 @@ from pydantic import BaseModel, Field, ValidationError
 from agent.config import ROOT, settings
 from agent.defaults import SLOTS
 
+# Onde moram prompts.json/tools.json/settings.json e os arquivos de runtime do Studio
+# (`atendimentos.json`, `models.json`). Quem precisa do diretório importa daqui — uma
+# constante só, para o canal e o Studio nunca discordarem de onde a config está.
+CONFIG_DIR = ROOT / "config"
+
 DEFAULT_VERSION = "default"
 _PLACEHOLDER_RE = re.compile(r"{([a-zA-Z_][a-zA-Z0-9_]*)}")
 
@@ -166,7 +171,7 @@ class ConfigError(ValueError):
 # --------------------------------------------------------------------------- store
 class ConfigStore:
     def __init__(self, config_dir: Path | None = None, slots: dict[str, dict] | None = None) -> None:
-        self.dir = Path(config_dir) if config_dir is not None else ROOT / "config"
+        self.dir = Path(config_dir) if config_dir is not None else CONFIG_DIR
         self._slots_def = slots if slots is not None else SLOTS
         self._cache: dict[str, tuple[float, Any]] = {}
         self._listeners: list[Callable[[str], None]] = []

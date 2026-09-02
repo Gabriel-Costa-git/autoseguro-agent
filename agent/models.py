@@ -213,6 +213,7 @@ class LeadState(BaseModel):
     turnos_sem_progresso: int = 0
     objecoes: int = 0
     ultima_pergunta: CampoColeta | None = None
+    origem: str | None = None             # canal de entrada: "whatsapp:<instância>", "cli", "lab"
 
 
 # --------------------------------------------------------------------------- ações (código → canal/LLM)
@@ -286,6 +287,7 @@ class Inbound(BaseModel):
     text: str | None = None
     media_type: MediaType = "text"
     sender_name: str | None = None
+    origem: str | None = None             # quem preenche é o canal; o turno copia para o `LeadState`
     ts: datetime = Field(default_factory=datetime.now)
 
 

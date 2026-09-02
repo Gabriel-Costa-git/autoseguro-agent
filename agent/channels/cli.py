@@ -143,12 +143,14 @@ async def conversar(
 
         turno += 1
         if comando == "/audio":
-            inbound = Inbound(conversation_id=conversation_id, message_id=f"m{turno}", media_type="audio")
+            inbound = Inbound(
+                conversation_id=conversation_id, message_id=f"m{turno}", media_type="audio", origem="cli"
+            )
         elif not linha:
             turno -= 1
             continue
         else:
-            inbound = Inbound(conversation_id=conversation_id, message_id=f"m{turno}", text=linha)
+            inbound = Inbound(conversation_id=conversation_id, message_id=f"m{turno}", text=linha, origem="cli")
 
         await conv.handle(inbound, emit)
         if roteiro is not None and ultima_saida == store.text("policy.txt_instabilidade") and repeticoes < 2:

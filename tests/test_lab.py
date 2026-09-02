@@ -114,6 +114,19 @@ def test_mensagem_devolve_outbound_e_estado(tmp_path, monkeypatch):
     assert client.get(f"/api/lab/sessions/{sid}/state").json()["idade"] == 35
 
 
+def test_mensagem_do_lab_marca_a_origem_lab(tmp_path, monkeypatch):
+    """A conversa do Lab aparece em Atendimentos com origem `lab`, não como lead de verdade."""
+    client, _ = _app(tmp_path, monkeypatch)
+    sid = _sid(client)
+    corpo = client.post(f"/api/lab/sessions/{sid}/messages", json={"text": "oi"}).json()
+
+    assert corpo["state"]["origem"] == "lab"
+    linhas = (tmp_path / "studio" / f"{sid}.jsonl").read_text(encoding="utf-8").splitlines()
+    inbound = json.loads(linhas[0])
+    assert inbound["event"] == "inbound"
+    assert inbound["data"]["origem"] == "lab"
+
+
 def test_conversa_completa_ate_a_cotacao_com_o_agente_real(tmp_path, monkeypatch):
     """Caminho feliz de ponta a ponta: o preço só aparece depois da API responder."""
     extracoes = [
@@ -339,6 +352,7 @@ def test_resumir_state_mascara_pii_e_nao_inventa_preco():
     )
     resumo = resumir_state(estado)
 
+    assert resumo["origem"] is None
     assert resumo["cep"] == "01310-***"
     assert resumo["cep_cidade"] == "São Paulo"
     assert resumo["cotacao"] is None

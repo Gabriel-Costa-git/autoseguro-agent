@@ -9,3 +9,8 @@ logs/*.jsonl
 data/
 .orq/
 logs/studio/
+
+# Config versionada = prompts/tools/settings. Estes dois nascem em runtime e são
+# estado da máquina, não da entrega: takeover em curso e cache do catálogo de modelos.
+config/atendimentos.json
+config/models.json
