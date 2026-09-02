@@ -1,0 +1,10 @@
+pergunte a idade do condutor principal
+pergunte a idade do condutor principal (contexto: motivo x)
+pergunte o modelo e o ano de fabricação do carro
+pergunte o modelo e o ano de fabricação do carro (contexto: motivo x)
+pergunte o CEP de onde o carro dorme à noite
+pergunte o CEP de onde o carro dorme à noite (contexto: motivo x)
+pergunte qual plano ele quer cotar
+pergunte qual plano ele quer cotar (contexto: motivo x)
+pergunte a partir de quando ele quer o seguro valendo
+pergunte a partir de quando ele quer o seguro valendo (contexto: motivo x)

@@ -1,0 +1,2 @@
+idade: 19; carro: Onix 2008 (ano 2008); cep: 08000000; plano escolhido: completo; início desejado: —; etapa: apresentado; cidade do cep: Guarulhos/SP; cotação: ok (o valor já foi enviado por outra mensagem)
+idade: —; carro: — (ano —); cep: —; plano escolhido: —; início desejado: —; etapa: inicio
