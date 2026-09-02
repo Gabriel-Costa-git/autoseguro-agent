@@ -70,6 +70,7 @@ canal (CLI | Evolution) ──Inbound──▶ conversation.handle
 | `scripts/export_ai_logs.py` | Exporta e higieniza as sessões de IA para `ai-logs/`. |
 | `agent/runtime_config.py`, `agent/defaults.py`, `config/` | Textos e parâmetros editáveis com versões, overrides e hot-reload (Studio). |
 | `agent/takeover.py`, `agent/atendimentos.py` | Quem responde cada conversa (`config/atendimentos.json`, lido também pelo `serve.py`) e o catálogo de atendimentos lido dos logs. |
+| `agent/tools_runtime.py` | Executa as tools criadas no painel (`http`/`sql`) e as entrega ao Responder como function calling; segredo só por `${env:X}`, SQL somente leitura. |
 | `agent/studio/` | Studio local: Atendimentos, Lab (Conversa · Prompts · Tools) e Config (FastAPI + estático, só 127.0.0.1). |
 
 ## Decisões e porquês
@@ -273,18 +274,73 @@ MESMA sessão do Lab — uma por aba do navegador, que sobrevive ao reload em ve
   fallbacks anti-preço, textos da policy, templates do presenter (cotação, planos, recusa,
   handoff por motivo) e textos da orquestração. Salvar aplica na hora, sem reiniciar. No rodapé,
   **Testar prompt** abre o chat do Lab embutido para conversar sem trocar de aba.
-- **Lab · Tools** — ficha de cada componente, em grade de dois campos por linha: `quote_client`
-  (endpoints, timeout, tentativas, orçamento, backoff), ViaCEP (liga/desliga, URL, timeout),
-  policy (limites de estagnação, tentativas de CEP, objeções até handoff) e regras
-  (pré-validação local liga/desliga). Cada campo mostra a origem do valor efetivo em um selo
-  (`default`, `env:VAR`, `override`) e, quando há override, um botão para voltar ao padrão.
+- **Lab · Tools** — as **integrações** do agente, em lista + detalhe. As embutidas (selo
+  `builtin`): `quote_client` (endpoints, timeout, tentativas, orçamento, backoff) e ViaCEP
+  (liga/desliga, URL, timeout), cada campo com a origem do valor efetivo num selo (`default`,
+  `env:VAR`, `override`) e o botão de voltar ao padrão. Cada uma traz também **Instruções e
+  textos**: os slots de Prompts que falam por ela (o texto de instabilidade da cotação, a
+  confirmação de CEP, a diretiva de pedir o CEP…), com a versão ativa, prévia e link para editar.
+  Abaixo delas ficam as **tools criadas no painel** — ver a seção logo adiante.
 - **Config** — mesma ficha para os `settings`: modelo do Gemini, janela de contexto do
   Responder (quantas mensagens do histórico vão em cada chamada; o Extractor é sem histórico
   por desenho), temperaturas, retry do LLM, delay do roteiro e caminho do banco de sessão. O
   modelo é um **seletor** com botão **Atualizar modelos**, que consulta a API do Google
   (`models.list`, só os que fazem `generateContent`) e guarda a lista em `config/models.json`;
   a mesma lista aparece na barra do chat do Lab. Escolher grava override em
-  `config/settings.json` e vale no próximo turno, sem reiniciar.
+  `config/settings.json` e vale no próximo turno, sem reiniciar. Aqui embaixo ficam também as
+  fichas de **policy** (limites de estagnação, tentativas de CEP, objeções até handoff) e de
+  **regras** (pré-validação local liga/desliga): elas ajustam a decisão do agente, não uma
+  integração, então saíram de Tools — os caminhos da API (`tools.policy.*`, `tools.rules.*`)
+  continuam os mesmos.
+
+### Tools criadas no painel
+
+Em **Lab · Tools**, *Nova tool* cria uma integração que o agente passa a ter à mão: ela vira uma
+função que o **Responder** pode chamar no meio da conversa (function calling do Gemini), com o
+nome, a descrição e os parâmetros que você escreveu. A descrição é o que o modelo lê para decidir
+*quando* chamar; o campo **Instruções** vai para o system prompt (ex.: "nunca leia o número da
+apólice inteiro; confirme só os 4 últimos dígitos").
+
+Dois tipos:
+
+- **`http`** — um request: método, URL, headers, query e body. `{parametro}` é substituído pelo
+  argumento que o modelo mandou (escapado na URL), e a resposta volta como JSON compacto ou texto.
+- **`sql`** — uma query **somente leitura** num sqlite (caminho do arquivo) ou num Postgres
+  (`postgresql://…`, só se `psycopg` estiver instalado — não é dependência do projeto). O
+  parâmetro é nomeado (`:cpf`), nunca interpolado na string.
+
+O que o painel garante, e por quê:
+
+- **Segredo nunca entra em `config/`.** Onde vai a chave, escreve-se `${env:APOLICE_KEY}`; o valor
+  fica no `.env` e é resolvido só na hora da chamada. A API do Studio devolve a referência literal,
+  e qualquer valor resolvido é apagado (`***`) do resultado e do log. O seletor `${env:X}` do
+  formulário lista só os **nomes** das variáveis do ambiente.
+- **SQL é só leitura, duas vezes.** O registro recusa query que não comece com `SELECT`/`WITH`, que
+  tenha `;` ou palavra de escrita (`update`, `delete`, `drop`, `pragma`, `into`…); e o sqlite ainda
+  é aberto em `mode=ro`, para o caso de alguém editar o JSON à mão.
+- **A tool nunca derruba o turno.** Timeout (`asyncio.wait_for`), rede fora, variável de ambiente
+  ausente ou SQL inválido viram a string `erro: …` devolvida ao modelo, que segue a conversa. O
+  resultado é truncado em *máx. caracteres* antes de voltar para o prompt.
+- **Cada execução vira um evento `tool_call`** no JSONL da conversa — `{tool, args, status:
+  ok|erro|timeout, latency_ms, resultado}`, com a PII mascarada como no resto do log. Ele aparece
+  no painel Eventos do Lab e na transcrição de Atendimentos (`tool_call consulta_apolice: ok ·
+  210 ms`, clicável para abrir args e resultado).
+- **Botão Testar**: roda a tool salva com os argumentos que você digitar, sem LLM e sem gravar
+  conversa nenhuma — devolve resultado e latência.
+
+Exemplo do que fica em `config/custom_tools.json` (o `${env:…}` é literal no arquivo):
+
+```json
+{"tools": {"consulta_apolice": {
+  "nome": "consulta_apolice", "tipo": "http", "enabled": true,
+  "descricao": "Consulta a apólice do cliente pelo CPF. Use quando o lead perguntar sobre uma apólice existente.",
+  "instrucoes": "Nunca leia o número da apólice em voz alta; confirme só os 4 últimos dígitos.",
+  "parametros": {"cpf": {"tipo": "string", "descricao": "CPF só dígitos", "obrigatorio": true}},
+  "timeout_s": 5, "max_chars": 2000,
+  "http": {"metodo": "GET", "url": "https://api.exemplo.com/apolices/{cpf}",
+           "headers": {"Authorization": "Bearer ${env:APOLICE_KEY}"}, "resposta": "json"}
+}}}
+```
 
 Como isso não altera o comportamento entregue:
 
@@ -294,6 +350,9 @@ Como isso não altera o comportamento entregue:
   origem de cada valor. Sem override, o agente é exatamente o da entrega.
 - `tests/test_golden_textos.py` compara 26 saídas reais (todas as mensagens do presenter, os
   prompts renderizados) com snapshots gerados do código entregue antes do refactor.
+- **Sem tool cadastrada, o Responder é o da entrega**: o `Agent` do agno é construído sem o
+  argumento `tools` (há teste que compara os kwargs da construção), e nenhum evento `tool_call`
+  existe. O Extractor e a policy nunca recebem tools — quem decide continua sendo código.
 - Atendimentos é **só leitura de log** — a fonte é `logs/*.jsonl` e `logs/studio/*.jsonl`, e
   `logs/entrega/` fica de fora. Quem responde cada conversa está em `config/atendimentos.json`:
   arquivo ausente ou vazio = o agente responde tudo, exatamente como na entrega.
@@ -307,6 +366,8 @@ Como isso não altera o comportamento entregue:
   Redis/DB.
 - Um plano por cotação: o agente pergunta o plano antes de cotar. Trocar de plano recota.
 - A Evolution API usa protocolo não oficial (Baileys); há risco de bloqueio do número.
+- Tool criada no painel vale só para o **Responder** (a conversa). O Extractor, a policy e a
+  cotação não a enxergam — de propósito: quem decide é código, não o modelo.
 - Ao **devolver ao agente** uma conversa assumida, o Responder não viu a troca humana: o
   histórico do agno só tem o que o próprio agente falou. Ele retoma do `LeadState`, então pode
   repetir algo que o operador já resolveu no meio.
