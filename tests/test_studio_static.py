@@ -93,3 +93,13 @@ def test_index_tem_a_aba_atendimentos(client: TestClient):
         "at-estado",
     ):
         assert f'id="{elemento}"' in resp.text
+
+
+def test_index_tem_a_aba_tools_reorganizada(client: TestClient):
+    """Tools virou lista (Integrações) + detalhe, com o popover de nova tool; policy e rules
+    passaram para Config, que agora tem o container das fichas de `tools.*`."""
+    resp = client.get("/")
+    assert resp.status_code == 200
+    for elemento in ("tl-itens", "tl-detalhe", "tl-nova", "tl-nova-btn", "tl-nova-nome", "tl-nova-tipo", "tl-sem-suporte"):
+        assert f'id="{elemento}"' in resp.text
+    assert 'id="config-tools-cards"' in resp.text

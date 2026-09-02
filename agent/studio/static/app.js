@@ -124,10 +124,12 @@ function abaAtual() {
   const bruto = (location.hash || "").replace(/^#/, "");
   const partes = bruto.split("/");
   const tab = partes[0];
-  const sub = partes.slice(1).join("/");
-  if (!TABS.includes(tab)) return { tab: "atendimentos", sub: "" };
-  if (tab === "lab") return { tab, sub: SUBS_LAB.includes(sub) ? sub : "conversa" };
-  return { tab, sub };
+  if (!TABS.includes(tab)) return { tab: "atendimentos", sub: "", item: "" };
+  if (tab === "lab") {
+    const sub = SUBS_LAB.includes(partes[1]) ? partes[1] : "conversa";
+    return { tab, sub, item: partes.slice(2).join("/") }; // slot de Prompts / nome da tool
+  }
+  return { tab, sub: partes.slice(1).join("/"), item: "" };
 }
 
 /** Manda o hash para a forma canônica; devolve true quando redirecionou (o hashchange refaz o render). */
@@ -189,7 +191,7 @@ let abaAnterior = null;
 
 function renderTab() {
   if (normalizarHash()) return;
-  const { tab, sub } = abaAtual();
+  const { tab, sub, item } = abaAtual();
   if (abaAnterior && abaAnterior !== tab) onTabHidden(abaAnterior);
   abaAnterior = tab;
   for (const t of TABS) el(`tab-${t}`).hidden = t !== tab;
@@ -200,13 +202,13 @@ function renderTab() {
   });
   el("lab-session-head").hidden = !(tab === "lab" && sub === "conversa");
   Breadcrumb.render();
-  onTabShown(tab, sub);
+  onTabShown(tab, sub, item);
 }
 
-function onTabShown(tab, sub) {
+function onTabShown(tab, sub, item) {
   if (tab === "atendimentos") Atendimentos.entrar(sub);
-  if (tab === "lab" && sub === "prompts") Prompts.load().catch((e) => toast(e.message, "error"));
-  if (tab === "lab" && sub === "tools") Tools.load().catch((e) => toast(e.message, "error"));
+  if (tab === "lab" && sub === "prompts") Prompts.load(item).catch((e) => toast(e.message, "error"));
+  if (tab === "lab" && sub === "tools") Tools.load(item).catch((e) => toast(e.message, "error"));
   if (tab === "config") Config.load().catch((e) => toast(e.message, "error"));
 }
 
@@ -353,9 +355,13 @@ const Prompts = {
   rascunhos: {}, // "key\nversão" -> {text, note} ainda não salvos (sobrevivem à troca de aba)
 
   // ---- dados
-  async load() {
+  async load(chaveInicial) {
     const data = await api("/api/prompts");
     this.slots = data.slots;
+    if (chaveInicial && this.slots[chaveInicial] && chaveInicial !== this.key) {
+      this.key = chaveInicial; // veio de #lab/prompts/<slot> (link "editar" da aba Tools)
+      this.version = this.slots[chaveInicial].active;
+    }
     if (!this.slots[this.key]) this.key = Object.keys(this.slots)[0] || null;
     const slot = this.slot();
     if (slot && !slot.versions[this.version]) this.version = slot.active;
@@ -571,6 +577,7 @@ const Prompts = {
     if (!this.slots[key]) return;
     this.key = key;
     this.version = this.slots[key].active;
+    history.replaceState(null, "", `#lab/prompts/${key}`); // link direto, sem recarregar a aba
     this.render();
   },
 
@@ -731,87 +738,246 @@ function lerCampo(id, def) {
   return campo.value;
 }
 
-// -------------------------------------------------------------------------- aba Tools
-const Tools = {
-  effective: null,
+// -------------------------------------------------------------------------- aba Tools (Integrações)
+// Lista à esquerda (builtin + tools criadas no painel) e detalhe à direita. As tools novas moram
+// em `/api/custom-tools`; enquanto essa rota não existir, a aba funciona só com as builtin.
+const TOOLS_BUILTIN = ["quote_client", "viacep"];
 
-  async load() {
-    const data = await api("/api/effective");
-    this.effective = data.tools;
-    this.render();
+const CAMPOS_VIACEP = [
+  { key: "enabled", label: "Habilitado", type: "switch" },
+  { key: "timeout_s", label: "Timeout (s)", type: "number", step: "0.1" },
+  { key: "url", label: "URL", type: "text", wide: true },
+];
+const CAMPOS_POLICY = [
+  { key: "max_turnos_sem_progresso", label: "Máx. turnos sem progresso", type: "number" },
+  { key: "max_cep_tentativas", label: "Máx. tentativas de CEP", type: "number" },
+  { key: "objecoes_ate_handoff", label: "Objeções até handoff", type: "number" },
+];
+const CAMPOS_RULES = [
+  { key: "pre_validacao_local", label: "Pré-validação local", type: "switch", help: "valida idade, ano e CEP antes de chamar a API" },
+];
+
+// textos de Prompts que cada integração produz ou usa (chaves conferidas em config/prompts.json)
+const SLOTS_DA_TOOL = {
+  viacep: {
+    chaves: ["presenter.confirm_cep", "diretiva.cep", "fallback.cep", "presenter.present.aviso_cep_ausente"],
+    prefixos: [],
   },
-
-  render() {
-    const container = el("tools-cards");
-    container.innerHTML = "";
-    container.appendChild(this.renderQuoteClientCard());
-    container.appendChild(
-      this.renderCard("viacep", "viacep", [
-        { key: "enabled", label: "Habilitado", type: "switch" },
-        { key: "timeout_s", label: "Timeout (s)", type: "number", step: "0.1" },
-        { key: "url", label: "URL", type: "text", wide: true },
-      ])
-    );
-    container.appendChild(
-      this.renderCard("policy", "policy", [
-        { key: "max_turnos_sem_progresso", label: "Máx. turnos sem progresso", type: "number" },
-        { key: "max_cep_tentativas", label: "Máx. tentativas de CEP", type: "number" },
-        { key: "objecoes_ate_handoff", label: "Objeções até handoff", type: "number" },
-      ])
-    );
-    container.appendChild(
-      this.renderCard("rules", "rules", [
-        { key: "pre_validacao_local", label: "Pré-validação local", type: "switch", help: "valida idade, ano e CEP antes de chamar a API" },
-      ])
-    );
+  quote_client: {
+    chaves: ["policy.txt_instabilidade", "policy.txt_aguarde", "policy.diretiva_pos_cotacao", "presenter.handoff.cotacao_indisponivel"],
+    prefixos: ["presenter.present.", "presenter.cobertura.", "presenter.refuse"],
   },
+};
 
-  renderCard(grupo, titulo, campos) {
-    const div = document.createElement("div");
-    div.className = "card";
-    const celulas = campos.map((def) => campoHtml(`tool-${grupo}-${def.key}`, def, this.effective[grupo][def.key], `${grupo}/${def.key}`)).join("");
-    div.innerHTML = `<h3>${escapeHtml(titulo)}</h3>
-      <div class="card-grid">${celulas}</div>
-      <div class="card-actions"><button type="button" class="primary save-btn">Salvar</button></div>`;
-    ligarSwitches(div);
-    this.wireResetButtons(div);
-    const btn = div.querySelector(".save-btn");
+const TIPOS_PARAM = ["string", "number", "integer", "boolean"];
+const METODOS_HTTP = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+
+/** Ficha de um grupo de `tools.*` (viacep, policy, rules): grade de campos + Salvar. */
+function fichaTools(grupo, titulo, campos, efetivo, recarregar) {
+  const div = document.createElement("div");
+  div.className = "card";
+  const celulas = campos.map((def) => campoHtml(`tool-${grupo}-${def.key}`, def, efetivo[grupo][def.key], `${grupo}/${def.key}`)).join("");
+  div.innerHTML = `<h3>${escapeHtml(titulo)}</h3>
+    <div class="card-grid">${celulas}</div>
+    <div class="card-actions"><button type="button" class="primary save-btn">Salvar</button></div>`;
+  ligarSwitches(div);
+  div.querySelectorAll(".reset-btn").forEach((btn) => {
     btn.addEventListener(
       "click",
       withLoading(btn, async () => {
-        const patch = {};
-        for (const def of campos) {
-          const novo = lerCampo(`tool-${grupo}-${def.key}`, def);
-          if (novo !== this.effective[grupo][def.key].value) patch[def.key] = novo;
-        }
-        if (Object.keys(patch).length === 0) {
-          toast("nada para salvar");
-          return;
-        }
-        await api("/api/tools", { method: "PUT", body: { [grupo]: patch } });
-        await this.load();
+        await api(`/api/tools/${btn.dataset.path}`, { method: "DELETE" });
+        await recarregar();
         toast("aplicado", "success");
       })
     );
+  });
+  const salvar = div.querySelector(".save-btn");
+  salvar.addEventListener(
+    "click",
+    withLoading(salvar, async () => {
+      const patch = {};
+      for (const def of campos) {
+        const novo = lerCampo(`tool-${grupo}-${def.key}`, def);
+        if (novo !== efetivo[grupo][def.key].value) patch[def.key] = novo;
+      }
+      if (Object.keys(patch).length === 0) {
+        toast("nada para salvar");
+        return;
+      }
+      await api("/api/tools", { method: "PUT", body: { [grupo]: patch } });
+      await recarregar();
+      toast("aplicado", "success");
+    })
+  );
+  return div;
+}
+
+function previaSlot(texto) {
+  return truncate(String(texto || "").replace(/\s+/g, " ").trim(), 220);
+}
+
+const Tools = {
+  effective: null,
+  custom: {}, // tools salvas no backend
+  rascunho: null, // tool criada no painel e ainda não salva
+  suporte: true, // `/api/custom-tools` existe?
+  envVars: [],
+  sel: null,
+
+  // ---- dados
+  async load(item) {
+    const data = await api("/api/effective");
+    this.effective = data.tools;
+    await this.carregarCustom();
+    await this.garantirSlots();
+    if (item && this.existe(item)) this.sel = item;
+    if (!this.existe(this.sel)) this.sel = "quote_client";
+    this.renderLista();
+    this.renderDetalhe();
+  },
+
+  existe(id) {
+    return Boolean(id && (TOOLS_BUILTIN.includes(id) || this.custom[id] || (this.rascunho && this.rascunho.nome === id)));
+  },
+
+  tool(id) {
+    if (this.custom[id]) return this.custom[id];
+    if (this.rascunho && this.rascunho.nome === id) return this.rascunho;
+    return null;
+  },
+
+  async carregarCustom() {
+    try {
+      const data = await api("/api/custom-tools");
+      this.custom = data.tools || {};
+      this.suporte = true;
+      if (!this.envVars.length) await this.carregarEnv();
+    } catch (err) {
+      if (err.status !== 404) toast(err.message || String(err), "error");
+      this.suporte = false;
+      this.custom = {};
+    }
+    el("tl-nova").hidden = !this.suporte;
+    el("tl-sem-suporte").hidden = this.suporte;
+  },
+
+  async carregarEnv() {
+    try {
+      const data = await api("/api/custom-tools/env");
+      this.envVars = data.vars || [];
+    } catch {
+      this.envVars = []; // sugestão de ${env:X} é conveniência, não requisito
+    }
+  },
+
+  /** O bloco "Instruções e textos" precisa dos slots; a aba Prompts pode não ter carregado ainda. */
+  async garantirSlots() {
+    if (Object.keys(Prompts.slots).length) return;
+    try {
+      const data = await api("/api/prompts");
+      Prompts.slots = data.slots;
+    } catch {
+      /* sem prévia dos textos; o resto da aba continua */
+    }
+  },
+
+  // ---- lista
+  renderLista() {
+    const box = el("tl-itens");
+    box.innerHTML = "";
+    for (const id of TOOLS_BUILTIN) box.appendChild(this.itemLista(id, [badgeEl("builtin")], null));
+    for (const [nome, tool] of Object.entries(this.custom)) {
+      box.appendChild(this.itemLista(nome, [badgeEl(tool.tipo, `tl-tipo-${tool.tipo}`)], Boolean(tool.enabled)));
+    }
+    if (this.rascunho) {
+      box.appendChild(this.itemLista(this.rascunho.nome, [badgeEl(this.rascunho.tipo, `tl-tipo-${this.rascunho.tipo}`), badgeEl("não salva")], false));
+    }
+  },
+
+  itemLista(id, badges, enabled) {
+    const div = document.createElement("div");
+    div.className = "tl-item" + (id === this.sel ? " selected" : "");
+    const ponto = document.createElement("span");
+    ponto.className = "tl-ponto" + (enabled ? " on" : "") + (enabled === null ? " builtin" : "");
+    ponto.title = enabled === null ? "integração nativa" : enabled ? "habilitada" : "desabilitada";
+    const nome = document.createElement("span");
+    nome.className = "tl-item-nome";
+    nome.textContent = id;
+    div.append(ponto, nome, ...badges);
+    div.addEventListener("click", () => this.selecionar(id));
     return div;
   },
 
-  renderEndpointRows(container, endpoints) {
-    container.innerHTML = "";
-    for (const [label, url] of Object.entries(endpoints)) this.addEndpointRow(container, label, url);
+  selecionar(id) {
+    if (!this.existe(id)) return;
+    this.sel = id;
+    history.replaceState(null, "", `#lab/tools/${id}`); // link direto sem recarregar a aba
+    this.renderLista();
+    this.renderDetalhe();
   },
 
-  addEndpointRow(container, label = "", url = "") {
-    const row = document.createElement("div");
-    row.className = "endpoint-row";
-    row.innerHTML = `<input type="text" class="ep-label" placeholder="rótulo" value="${escapeHtml(label)}" />
-      <input type="text" class="ep-url" placeholder="http://..." value="${escapeHtml(url)}" />
-      <button type="button" class="icon ep-remove" title="remover endpoint" aria-label="remover endpoint">${icon("remove")}</button>`;
-    row.querySelector(".ep-remove").addEventListener("click", () => row.remove());
-    container.appendChild(row);
+  // ---- detalhe
+  renderDetalhe() {
+    const box = el("tl-detalhe");
+    box.innerHTML = "";
+    if (this.sel === "quote_client") {
+      const nota = document.createElement("p");
+      nota.className = "notice";
+      nota.textContent = "guard_price não é configurável por regra.";
+      box.append(nota, this.cardQuoteClient(), this.blocoSlots("quote_client"));
+      return;
+    }
+    if (this.sel === "viacep") {
+      box.append(fichaTools("viacep", "viacep", CAMPOS_VIACEP, this.effective, () => this.load(this.sel)), this.blocoSlots("viacep"));
+      return;
+    }
+    const tool = this.tool(this.sel);
+    if (tool) box.appendChild(this.formularioTool(tool));
   },
 
-  renderQuoteClientCard() {
+  blocoSlots(toolId) {
+    const cfg = SLOTS_DA_TOOL[toolId] || { chaves: [], prefixos: [] };
+    const chaves = Object.keys(Prompts.slots)
+      .filter((k) => cfg.chaves.includes(k) || cfg.prefixos.some((p) => k.startsWith(p)))
+      .sort();
+    const card = document.createElement("div");
+    card.className = "card";
+    const titulo = document.createElement("h3");
+    titulo.textContent = "Instruções e textos";
+    const ajuda = document.createElement("p");
+    ajuda.className = "field-help";
+    ajuda.textContent = chaves.length
+      ? "O que esta integração escreve para o lead. Editar abre o slot na aba Prompts."
+      : "Nenhum texto de Prompts ligado a esta integração.";
+    card.append(titulo, ajuda);
+    for (const chave of chaves) {
+      const slot = Prompts.slots[chave];
+      const versao = slot.versions[slot.active] || { text: "" };
+      const linha = document.createElement("div");
+      linha.className = "tl-slot";
+      const topo = document.createElement("div");
+      topo.className = "tl-slot-topo";
+      const label = document.createElement("span");
+      label.className = "tl-slot-label";
+      label.textContent = slot.label;
+      const key = document.createElement("span");
+      key.className = "dd-item-key";
+      key.textContent = chave;
+      const link = document.createElement("a");
+      link.className = "link tl-slot-link";
+      link.href = `#lab/prompts/${chave}`;
+      link.textContent = "editar";
+      topo.append(label, key, badgeEl(slot.active, slot.active === "default" ? "" : "badge-ativa"), link);
+      const previa = document.createElement("p");
+      previa.className = "tl-slot-previa";
+      previa.textContent = previaSlot(versao.text);
+      linha.append(topo, previa);
+      card.appendChild(linha);
+    }
+    return card;
+  },
+
+  cardQuoteClient() {
     const grupo = "quote_client";
     const g = this.effective[grupo];
     const div = document.createElement("div");
@@ -849,21 +1015,29 @@ const Tools = {
       <div class="card-actions"><button type="button" class="primary save-btn">Salvar</button></div>
     `;
     const linhas = div.querySelector("#tool-endpoints-rows");
-    this.renderEndpointRows(linhas, endpoints);
-    div.querySelector("#tool-endpoints-add").addEventListener("click", () => this.addEndpointRow(linhas));
+    for (const [label, url] of Object.entries(endpoints)) this.linhaEndpoint(linhas, label, url);
+    div.querySelector("#tool-endpoints-add").addEventListener("click", () => this.linhaEndpoint(linhas));
     div.querySelector("#tool-qc-base_url-select").addEventListener("change", (e) => {
       if (e.target.value) div.querySelector("#tool-quote_client-base_url").value = e.target.value;
     });
-    this.wireResetButtons(div);
+    div.querySelectorAll(".reset-btn").forEach((btn) => {
+      btn.addEventListener(
+        "click",
+        withLoading(btn, async () => {
+          await api(`/api/tools/${btn.dataset.path}`, { method: "DELETE" });
+          await this.load(this.sel);
+          toast("aplicado", "success");
+        })
+      );
+    });
 
-    const btn = div.querySelector(".save-btn");
-    btn.addEventListener(
+    const salvar = div.querySelector(".save-btn");
+    salvar.addEventListener(
       "click",
-      withLoading(btn, async () => {
+      withLoading(salvar, async () => {
         const patch = {};
         const baseUrl = div.querySelector("#tool-quote_client-base_url").value;
         if (baseUrl !== g.base_url.value) patch.base_url = baseUrl;
-
         const novosEndpoints = {};
         linhas.querySelectorAll(".endpoint-row").forEach((row) => {
           const label = row.querySelector(".ep-label").value.trim();
@@ -871,7 +1045,6 @@ const Tools = {
           if (label && url) novosEndpoints[label] = url;
         });
         if (JSON.stringify(novosEndpoints) !== JSON.stringify(endpoints)) patch.endpoints = novosEndpoints;
-
         for (const key of ["timeout_s", "max_attempts", "budget_s", "backoff_base_s"]) {
           const novo = Number(el(`tool-quote_client-${key}`).value);
           if (novo !== g[key].value) patch[key] = novo;
@@ -881,30 +1054,369 @@ const Tools = {
           return;
         }
         await api("/api/tools", { method: "PUT", body: { quote_client: patch } });
-        await this.load();
+        await this.load(this.sel);
         toast("aplicado", "success");
       })
     );
     return div;
   },
 
-  wireResetButtons(div) {
-    div.querySelectorAll(".reset-btn").forEach((btn) => {
-      btn.addEventListener(
-        "click",
-        withLoading(btn, async () => {
-          await api(`/api/tools/${btn.dataset.path}`, { method: "DELETE" });
-          await this.load();
-          toast("aplicado", "success");
-        })
-      );
+  linhaEndpoint(container, label = "", url = "") {
+    const row = document.createElement("div");
+    row.className = "endpoint-row";
+    row.innerHTML = `<input type="text" class="ep-label" placeholder="rótulo" value="${escapeHtml(label)}" />
+      <input type="text" class="ep-url" placeholder="http://..." value="${escapeHtml(url)}" />
+      <button type="button" class="icon ep-remove" title="remover endpoint" aria-label="remover endpoint">${icon("remove")}</button>`;
+    row.querySelector(".ep-remove").addEventListener("click", () => row.remove());
+    container.appendChild(row);
+  },
+
+  // ---- formulário de uma tool nova
+  formularioTool(tool) {
+    const novo = !this.custom[tool.nome];
+    const card = document.createElement("div");
+    card.className = "card tl-form";
+    const http = tool.http || { metodo: "GET", url: "", headers: {}, query: {}, body: null, resposta: "json" };
+    const sql = tool.sql || { conexao: "", query: "", max_linhas: 20 };
+    card.innerHTML = `
+      <div class="tl-form-head">
+        <h3>${escapeHtml(tool.nome)}</h3>
+        <span class="badge tl-tipo-${escapeHtml(tool.tipo)}">${escapeHtml(tool.tipo)}</span>
+        ${novo ? '<span class="badge">não salva</span>' : ""}
+        <label class="switch"><input type="checkbox" id="tl-enabled" ${tool.enabled ? "checked" : ""} /><span>${tool.enabled ? "ligada" : "desligada"}</span></label>
+        <div class="tl-form-acoes">
+          <button type="button" class="danger" id="tl-apagar">${novo ? "Descartar" : "Apagar"}</button>
+          <button type="button" class="primary" id="tl-salvar">Salvar</button>
+        </div>
+      </div>
+      <div class="card-grid">
+        <div class="field-cell wide">
+          <div class="field-head"><span class="field-label">Descrição</span></div>
+          <textarea id="tl-descricao" rows="2" placeholder="quando o modelo deve chamar esta tool">${escapeHtml(tool.descricao || "")}</textarea>
+          <span class="field-help">é o que o modelo lê para decidir se usa a tool</span>
+        </div>
+        <div class="field-cell wide">
+          <div class="field-head"><span class="field-label">Instruções (opcional)</span></div>
+          <textarea id="tl-instrucoes" rows="2" placeholder="regras que entram no prompt quando esta tool está ativa">${escapeHtml(tool.instrucoes || "")}</textarea>
+        </div>
+        <div class="field-cell wide">
+          <div class="field-head"><span class="field-label">Parâmetros</span></div>
+          <div class="tl-params" id="tl-params"></div>
+          <button type="button" class="small" id="tl-param-add">${icon("plus")} parâmetro</button>
+        </div>
+        ${
+          tool.tipo === "http"
+            ? `<div class="field-cell">
+                 <div class="field-head"><span class="field-label">Método</span></div>
+                 <select id="tl-metodo">${METODOS_HTTP.map((m) => `<option${m === http.metodo ? " selected" : ""}>${m}</option>`).join("")}</select>
+               </div>
+               <div class="field-cell">
+                 <div class="field-head"><span class="field-label">Resposta</span></div>
+                 <select id="tl-resposta">
+                   <option value="json"${http.resposta === "json" ? " selected" : ""}>json</option>
+                   <option value="texto"${http.resposta === "texto" ? " selected" : ""}>texto</option>
+                 </select>
+               </div>
+               <div class="field-cell wide">
+                 <div class="field-head"><span class="field-label">URL</span></div>
+                 <input type="text" id="tl-url" value="${escapeHtml(http.url || "")}" placeholder="https://api.exemplo.com/recurso/{param}" />
+                 <span class="field-help">use {nome_do_parametro} para interpolar</span>
+               </div>
+               <div class="field-cell wide">
+                 <div class="field-head"><span class="field-label">Headers</span></div>
+                 <div class="tl-pares" id="tl-headers"></div>
+                 <button type="button" class="small" id="tl-header-add">${icon("plus")} header</button>
+               </div>
+               <div class="field-cell wide">
+                 <div class="field-head"><span class="field-label">Query</span></div>
+                 <div class="tl-pares" id="tl-query"></div>
+                 <button type="button" class="small" id="tl-query-add">${icon("plus")} parâmetro de query</button>
+               </div>
+               <div class="field-cell wide">
+                 <div class="field-head"><span class="field-label">Body (JSON, opcional)</span></div>
+                 <textarea id="tl-body" class="mono" rows="3" placeholder='{"cpf": "{cpf}"}'>${escapeHtml(http.body === null || http.body === undefined ? "" : typeof http.body === "string" ? http.body : JSON.stringify(http.body, null, 2))}</textarea>
+               </div>`
+            : `<div class="field-cell wide">
+                 <div class="field-head"><span class="field-label">Conexão</span></div>
+                 <input type="text" id="tl-conexao" value="${escapeHtml(sql.conexao || "")}" placeholder="data/apolices.db  ou  \${env:APOLICES_DB}" />
+               </div>
+               <div class="field-cell wide">
+                 <div class="field-head"><span class="field-label">Query (somente leitura)</span></div>
+                 <textarea id="tl-query-sql" class="mono" rows="4" placeholder="SELECT numero, status FROM apolices WHERE cpf = :cpf LIMIT 20">${escapeHtml(sql.query || "")}</textarea>
+                 <span class="field-help">um SELECT/WITH, sem ponto e vírgula; parâmetros como :nome</span>
+               </div>
+               <div class="field-cell">
+                 <div class="field-head"><span class="field-label">Máx. linhas</span></div>
+                 <input type="number" id="tl-max-linhas" value="${escapeHtml(sql.max_linhas ?? 20)}" />
+               </div>`
+        }
+        <div class="field-cell">
+          <div class="field-head"><span class="field-label">Timeout (s)</span></div>
+          <input type="number" id="tl-timeout" step="0.5" value="${escapeHtml(tool.timeout_s ?? 5)}" />
+        </div>
+        <div class="field-cell">
+          <div class="field-head"><span class="field-label">Máx. caracteres do resultado</span></div>
+          <input type="number" id="tl-max-chars" value="${escapeHtml(tool.max_chars ?? 2000)}" />
+        </div>
+        <div class="field-cell wide">
+          <div class="field-head"><span class="field-label">Variáveis de ambiente</span></div>
+          <div class="field-dupla">
+            <select id="tl-env">
+              <option value="">inserir \${env:…} no campo em foco</option>
+              ${this.envVars.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("")}
+            </select>
+          </div>
+          <span class="field-help">${this.envVars.length ? "o valor fica no ambiente; só o nome é gravado em config/" : "nenhuma variável disponível (o backend informa só os nomes)"}</span>
+        </div>
+      </div>
+
+      <div class="tl-testar">
+        <h4>Testar</h4>
+        <p class="field-help">roda a tool salva, sem passar pelo modelo e sem gravar evento na conversa.</p>
+        <div class="tl-testar-args" id="tl-testar-args"></div>
+        <div class="card-actions">
+          <button type="button" class="primary" id="tl-testar-btn"${novo ? " disabled" : ""}>Testar</button>
+        </div>
+        <pre class="tl-testar-saida" id="tl-testar-saida" hidden></pre>
+      </div>
+    `;
+
+    ligarSwitches(card);
+    const params = card.querySelector("#tl-params");
+    for (const [nome, def] of Object.entries(tool.parametros || {})) this.linhaParam(params, nome, def);
+    card.querySelector("#tl-param-add").addEventListener("click", () => this.linhaParam(params));
+    if (tool.tipo === "http") {
+      const headers = card.querySelector("#tl-headers");
+      const query = card.querySelector("#tl-query");
+      for (const [k, v] of Object.entries(http.headers || {})) this.linhaPar(headers, k, v);
+      for (const [k, v] of Object.entries(http.query || {})) this.linhaPar(query, k, v);
+      card.querySelector("#tl-header-add").addEventListener("click", () => this.linhaPar(headers));
+      card.querySelector("#tl-query-add").addEventListener("click", () => this.linhaPar(query));
+    }
+    this.ligarEnv(card);
+    this.renderArgsTeste(card, tool);
+
+    const salvar = card.querySelector("#tl-salvar");
+    salvar.addEventListener("click", withLoading(salvar, () => this.salvarTool(tool)));
+    const apagar = card.querySelector("#tl-apagar");
+    apagar.addEventListener("click", withLoading(apagar, () => this.apagarTool(tool)));
+    const testar = card.querySelector("#tl-testar-btn");
+    testar.addEventListener("click", withLoading(testar, () => this.testarTool(tool)));
+    return card;
+  },
+
+  linhaParam(container, nome = "", def = {}) {
+    const row = document.createElement("div");
+    row.className = "tl-param-row";
+    row.innerHTML = `
+      <input type="text" class="p-nome" placeholder="nome" value="${escapeHtml(nome)}" />
+      <select class="p-tipo">${TIPOS_PARAM.map((t) => `<option${t === (def.tipo || "string") ? " selected" : ""}>${t}</option>`).join("")}</select>
+      <input type="text" class="p-desc" placeholder="descrição para o modelo" value="${escapeHtml(def.descricao || "")}" />
+      <label class="switch"><input type="checkbox" class="p-obr" ${def.obrigatorio ? "checked" : ""} /><span>${def.obrigatorio ? "obrigatório" : "opcional"}</span></label>
+      <button type="button" class="icon p-rm" title="remover parâmetro" aria-label="remover parâmetro">${icon("remove")}</button>`;
+    ligarSwitches(row);
+    row.querySelector(".p-obr").addEventListener("change", (e) => {
+      e.target.nextElementSibling.textContent = e.target.checked ? "obrigatório" : "opcional";
     });
+    row.querySelector(".p-rm").addEventListener("click", () => row.remove());
+    container.appendChild(row);
+  },
+
+  linhaPar(container, chave = "", valor = "") {
+    const row = document.createElement("div");
+    row.className = "tl-par-row";
+    row.innerHTML = `<input type="text" class="k" placeholder="chave" value="${escapeHtml(chave)}" />
+      <input type="text" class="v" placeholder="valor" value="${escapeHtml(valor)}" />
+      <button type="button" class="icon rm" title="remover" aria-label="remover">${icon("remove")}</button>`;
+    row.querySelector(".rm").addEventListener("click", () => row.remove());
+    container.appendChild(row);
+  },
+
+  /** O select de ${env:X} escreve no último campo de texto que teve foco no formulário. */
+  ligarEnv(card) {
+    let ultimo = null;
+    card.addEventListener("focusin", (ev) => {
+      if (ev.target.matches('input[type="text"], textarea')) ultimo = ev.target;
+    });
+    const select = card.querySelector("#tl-env");
+    select.addEventListener("change", () => {
+      const nome = select.value;
+      select.value = "";
+      if (!nome) return;
+      if (!ultimo) {
+        toast("clique antes no campo onde a variável entra", "error");
+        return;
+      }
+      const marca = `\${env:${nome}}`;
+      const ini = ultimo.selectionStart ?? ultimo.value.length;
+      const fim = ultimo.selectionEnd ?? ini;
+      ultimo.value = ultimo.value.slice(0, ini) + marca + ultimo.value.slice(fim);
+      ultimo.focus();
+      ultimo.selectionStart = ultimo.selectionEnd = ini + marca.length;
+    });
+  },
+
+  renderArgsTeste(card, tool) {
+    const box = card.querySelector("#tl-testar-args");
+    box.innerHTML = "";
+    const params = Object.entries(tool.parametros || {});
+    if (!params.length) {
+      box.innerHTML = '<p class="muted">Sem parâmetros.</p>';
+      return;
+    }
+    for (const [nome, def] of params) {
+      const linha = document.createElement("label");
+      linha.className = "tl-arg";
+      const rotulo = document.createElement("span");
+      rotulo.className = "field-label";
+      rotulo.textContent = nome + (def.obrigatorio ? " *" : "");
+      const campo = document.createElement("input");
+      campo.className = "tl-arg-campo";
+      campo.dataset.nome = nome;
+      campo.dataset.tipo = def.tipo || "string";
+      campo.type = def.tipo === "boolean" ? "checkbox" : def.tipo === "number" || def.tipo === "integer" ? "number" : "text";
+      campo.placeholder = def.descricao || "";
+      linha.append(rotulo, campo);
+      box.appendChild(linha);
+    }
+  },
+
+  // ---- ações
+  coletar(tool) {
+    const parametros = {};
+    for (const row of document.querySelectorAll("#tl-params .tl-param-row")) {
+      const nome = row.querySelector(".p-nome").value.trim();
+      if (!nome) continue;
+      parametros[nome] = {
+        tipo: row.querySelector(".p-tipo").value,
+        descricao: row.querySelector(".p-desc").value,
+        obrigatorio: row.querySelector(".p-obr").checked,
+      };
+    }
+    const pares = (seletor) => {
+      const saida = {};
+      for (const row of document.querySelectorAll(`${seletor} .tl-par-row`)) {
+        const chave = row.querySelector(".k").value.trim();
+        if (chave) saida[chave] = row.querySelector(".v").value;
+      }
+      return saida;
+    };
+    const novo = {
+      ...tool,
+      nome: tool.nome,
+      tipo: tool.tipo,
+      enabled: el("tl-enabled").checked,
+      descricao: el("tl-descricao").value,
+      instrucoes: el("tl-instrucoes").value,
+      parametros,
+      timeout_s: Number(el("tl-timeout").value),
+      max_chars: Number(el("tl-max-chars").value),
+    };
+    if (tool.tipo === "http") {
+      const body = el("tl-body").value.trim();
+      novo.http = {
+        metodo: el("tl-metodo").value,
+        url: el("tl-url").value.trim(),
+        headers: pares("#tl-headers"),
+        query: pares("#tl-query"),
+        body: body || null,
+        resposta: el("tl-resposta").value,
+      };
+      novo.sql = null;
+    } else {
+      novo.sql = {
+        conexao: el("tl-conexao").value.trim(),
+        query: el("tl-query-sql").value.trim(),
+        max_linhas: Number(el("tl-max-linhas").value),
+      };
+      novo.http = null;
+    }
+    return novo;
+  },
+
+  async salvarTool(tool) {
+    const corpo = this.coletar(tool);
+    const salva = await api(`/api/custom-tools/${encodeURIComponent(tool.nome)}`, { method: "PUT", body: corpo });
+    this.custom[tool.nome] = salva && salva.nome ? salva : corpo;
+    if (this.rascunho && this.rascunho.nome === tool.nome) this.rascunho = null;
+    toast("tool salva", "success");
+    await this.load(tool.nome);
+  },
+
+  async apagarTool(tool) {
+    if (this.rascunho && this.rascunho.nome === tool.nome) {
+      this.rascunho = null;
+      this.sel = "quote_client";
+      this.renderLista();
+      this.renderDetalhe();
+      return;
+    }
+    await api(`/api/custom-tools/${encodeURIComponent(tool.nome)}`, { method: "DELETE" });
+    delete this.custom[tool.nome];
+    this.sel = "quote_client";
+    history.replaceState(null, "", "#lab/tools/quote_client"); // o hash não pode apontar para o que não existe mais
+    toast("tool apagada", "success");
+    await this.load(this.sel);
+  },
+
+  async testarTool(tool) {
+    const args = {};
+    for (const campo of document.querySelectorAll("#tl-testar-args .tl-arg-campo")) {
+      const tipo = campo.dataset.tipo;
+      if (tipo === "boolean") args[campo.dataset.nome] = campo.checked;
+      else if (campo.value !== "") args[campo.dataset.nome] = tipo === "number" || tipo === "integer" ? Number(campo.value) : campo.value;
+    }
+    const saida = el("tl-testar-saida");
+    const data = await api(`/api/custom-tools/${encodeURIComponent(tool.nome)}/testar`, { method: "POST", body: { args } });
+    saida.hidden = false;
+    saida.textContent = `${data.ok ? "ok" : "erro"} · ${data.latency_ms} ms\n\n${data.erro ? `erro: ${data.erro}\n\n` : ""}${data.resultado || ""}`;
+  },
+
+  // ---- nova tool (popover)
+  init() {
+    el("tl-nova-btn").addEventListener("click", () =>
+      alternarDd(el("tl-nova-menu"), el("tl-nova-btn"), () => {
+        el("tl-nova-nome").value = "";
+        el("tl-nova-nome").focus();
+      })
+    );
+    el("tl-nova-cancel").addEventListener("click", () => fecharDd());
+    el("tl-nova-criar").addEventListener("click", () => this.criarTool());
+  },
+
+  criarTool() {
+    const nome = el("tl-nova-nome").value.trim();
+    if (!/^[a-z][a-z0-9_]{2,40}$/.test(nome)) {
+      toast("nome inválido: minúsculas, números e _ , começando por letra", "error");
+      return;
+    }
+    if (this.existe(nome)) {
+      toast(`já existe uma tool chamada ${nome}`, "error");
+      return;
+    }
+    const tipo = el("tl-nova-tipo").value;
+    // nasce como rascunho local e desligada: nada vai para config/ antes do primeiro Salvar
+    this.rascunho = {
+      nome,
+      tipo,
+      enabled: false,
+      descricao: "",
+      instrucoes: "",
+      parametros: {},
+      timeout_s: 5,
+      max_chars: 2000,
+      http: tipo === "http" ? { metodo: "GET", url: "", headers: {}, query: {}, body: null, resposta: "json" } : null,
+      sql: tipo === "sql" ? { conexao: "", query: "", max_linhas: 20 } : null,
+    };
+    fecharDd();
+    this.selecionar(nome);
   },
 };
 
 // -------------------------------------------------------------------------- aba Config
 const Config = {
   effective: null,
+  tools: null,
   campos: [
     { key: "gemini_model", label: "Modelo Gemini", type: "select", wide: true },
     {
@@ -924,6 +1436,7 @@ const Config = {
   async load() {
     const data = await api("/api/effective");
     this.effective = data.settings;
+    this.tools = data.tools; // policy e rules moram aqui desde a v3
     this.render();
   },
 
@@ -991,6 +1504,17 @@ const Config = {
         toast("aplicado", "success");
       })
     );
+
+    this.renderFichasTools();
+  },
+
+  /** `policy` e `rules` saíram de Tools; a API continua sendo `PUT /api/tools`. */
+  renderFichasTools() {
+    const box = el("config-tools-cards");
+    box.innerHTML = "";
+    if (!this.tools) return;
+    box.appendChild(fichaTools("policy", "policy", CAMPOS_POLICY, this.tools, () => this.load()));
+    box.appendChild(fichaTools("rules", "rules", CAMPOS_RULES, this.tools, () => this.load()));
   },
 };
 
@@ -1025,6 +1549,8 @@ function summarizeEvent(ev) {
       return `llm_call (${d.papel}): ${d.latency_ms} ms`;
     case "llm_trace":
       return `llm_trace (${d.papel} #${d.tentativa}): ${d.status} · ${d.latency_ms} ms`;
+    case "tool_call":
+      return `tool_call ${d.tool}: ${d.status}${d.latency_ms != null ? ` · ${d.latency_ms} ms` : ""}`;
     case "handoff":
       return `handoff: ${d.reason}`;
     case "refusal":
@@ -1954,6 +2480,7 @@ function atalhos() {
 document.addEventListener("DOMContentLoaded", () => {
   Health.start();
   Atendimentos.init();
+  Tools.init();
   Prompts.init();
   Lab.init();
   TestPanel.init();
