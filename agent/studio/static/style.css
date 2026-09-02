@@ -59,7 +59,8 @@ svg { flex: none; }
   padding: 0 16px; background: var(--bg); border-bottom: 1px solid var(--border);
 }
 .topbar-left, .topbar-right { display: flex; align-items: center; gap: 14px; min-width: 0; }
-.brand { font-weight: 600; white-space: nowrap; }
+.brand { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; white-space: nowrap; }
+.brand-icon { width: 22px; height: 22px; flex: none; }
 
 .breadcrumb { display: flex; align-items: center; gap: 8px; font-size: 13px; min-width: 0; }
 .breadcrumb .crumb { color: var(--text-2); white-space: nowrap; }
