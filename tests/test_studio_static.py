@@ -1,5 +1,5 @@
 """Testes dos estáticos do Studio: confere que os arquivos são servidos, que
-`index.html` referencia `app.js`/`style.css` e que o shell traz as 4 abas (`data-tab`)
+`index.html` referencia `app.js`/`style.css` e que o shell traz as abas e sub-abas
 — o conteúdo/comportamento da UI em si não é testável sem um browser real (é o que o
 reporte descreve em texto).
 """
@@ -51,13 +51,15 @@ def test_style_css_e_servido_em_static(client: TestClient):
     assert ".shell" in resp.text
 
 
-def test_index_tem_data_tab_para_as_quatro_abas(client: TestClient):
-    """A barra superior traz as 4 abas como links segmentados (`data-tab` é o que o
-    roteador do app.js usa para marcar a ativa)."""
+def test_index_tem_abas_de_topo_e_sub_abas_do_lab(client: TestClient):
+    """Hierarquia v2: 3 abas de topo (`data-tab`) e as 3 sub-abas do Lab (`data-sub`) —
+    é por esses atributos que o roteador do app.js marca a ativa."""
     resp = client.get("/")
     assert resp.status_code == 200
-    for aba in ("lab", "prompts", "tools", "config"):
+    for aba in ("atendimentos", "lab", "config"):
         assert f'data-tab="{aba}"' in resp.text
+    for sub in ("conversa", "prompts", "tools"):
+        assert f'data-sub="{sub}"' in resp.text
 
 
 def test_markdown_js_e_servido_em_static(client: TestClient):

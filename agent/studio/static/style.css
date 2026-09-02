@@ -313,7 +313,7 @@ button.loading::after {
 .chat-foot-row { display: flex; align-items: center; gap: 10px; padding: 10px 16px 0; }
 .chat-foot-row select { width: auto; min-width: 210px; }
 .chat-foot-row input { width: 240px; }
-.chip-ro { height: 36px; color: var(--text-2); }
+.chat-model { width: auto; min-width: 190px; max-width: 280px; }
 .composer { display: flex; align-items: center; gap: 10px; padding: 12px 16px; }
 .composer input { flex: 1; height: 48px; padding: 0 14px; background-color: var(--surface); }
 .composer-x { width: 32px; height: 32px; padding: 0; background: none; border: none; color: var(--text-muted); }
@@ -331,11 +331,17 @@ button.loading::after {
 .diff-line { padding: 0 2px; }
 .diff-line.changed { background: var(--warn-bg); color: var(--warn); }
 
-/* ---------------------------------------------------------------- Lab */
-.lab-page { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+/* ---------------------------------------------------------------- Atendimentos */
+.at-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+
+/* ---------------------------------------------------------------- Lab (Conversa · Prompts · Tools) */
+.lab-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .lab-head { flex: none; min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid var(--border); }
-.lab-head-left { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; }
-.lab-head-left .mono { font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
+.lab-session { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; }
+.lab-session .mono { font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
+.lab-sub { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.lab-sub-pad { padding: 16px 20px 28px; overflow: auto; }
+.lab-sub > .prompts-page { flex: 1; }
 .lab-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 380px; }
 .lab-chat { min-width: 0; display: flex; flex-direction: column; }
 .lab-side { display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--border); }

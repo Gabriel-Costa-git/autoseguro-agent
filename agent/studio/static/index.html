@@ -16,9 +16,8 @@
         </div>
         <div class="topbar-right">
           <nav class="tabs" id="tabs" aria-label="Abas">
-            <a href="#lab" data-tab="lab">Lab</a>
-            <a href="#prompts" data-tab="prompts">Prompts</a>
-            <a href="#tools" data-tab="tools">Tools</a>
+            <a href="#atendimentos" data-tab="atendimentos">Atendimentos</a>
+            <a href="#lab/conversa" data-tab="lab">Lab</a>
             <a href="#config" data-tab="config">Config</a>
           </nav>
           <div class="health" title="Studio · 127.0.0.1">
@@ -29,151 +28,171 @@
       </header>
 
       <main class="content">
+        <!-- ------------------------------------------------------------ ATENDIMENTOS -->
+        <section id="tab-atendimentos" class="tab-panel at-shell" hidden>
+          <div class="empty-state" id="at-empty">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /><path d="M8 9h8" /><path d="M8 13h5" /></svg>
+            <div class="empty-1">As conversas do agente aparecem aqui.</div>
+            <div class="empty-2">WhatsApp, Lab e CLI numa lista só, com origem, etapa e a opção de assumir a conversa.</div>
+          </div>
+        </section>
+
         <!-- ------------------------------------------------------------ LAB -->
-        <section id="tab-lab" class="tab-panel lab-page" hidden>
+        <section id="tab-lab" class="tab-panel lab-shell" hidden>
           <div class="lab-head">
-            <div class="lab-head-left">
+            <div class="segmented" id="lab-subtabs">
+              <button type="button" data-sub="conversa">Conversa</button>
+              <button type="button" data-sub="prompts">Prompts</button>
+              <button type="button" data-sub="tools">Tools</button>
+            </div>
+            <!-- sessão do chat: só faz sentido no painel Conversa -->
+            <div class="lab-session" id="lab-session-head">
               <span class="muted">sessão</span>
               <span class="mono" id="lab-session-id">(sem sessão)</span>
               <button type="button" class="icon" id="lab-copy-id" title="Copiar id da sessão" aria-label="Copiar id da sessão" disabled>
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
               </button>
+              <button id="lab-new-session" class="primary" type="button">Nova sessão</button>
             </div>
-            <button id="lab-new-session" class="primary" type="button">Nova sessão</button>
           </div>
 
-          <div class="lab-body">
-            <div class="lab-chat" id="lab-chat"></div>
+          <!-- ---------------------------------------------- Lab · Conversa -->
+          <div class="lab-sub" id="lab-sub-conversa">
+            <div class="lab-body">
+              <div class="lab-chat" id="lab-chat"></div>
 
-            <aside class="lab-side">
-              <div class="lab-side-head">
-                <div class="segmented" id="lab-side-tabs">
-                  <button type="button" data-pane="eventos" class="active">Eventos</button>
-                  <button type="button" data-pane="contexto">Contexto</button>
-                  <button type="button" data-pane="estado">Estado</button>
-                </div>
-              </div>
-              <div class="lab-pane" id="lab-pane-eventos">
-                <div id="lab-events-list" class="events-list"></div>
-              </div>
-              <div class="lab-pane" id="lab-pane-contexto" hidden>
-                <div id="lab-context-body" class="context-body">
-                  <p class="muted">Selecione um turno (bolha do lead) para ver o contexto.</p>
-                </div>
-              </div>
-              <div class="lab-pane" id="lab-pane-estado" hidden>
-                <pre id="lab-state-json">(sem sessão)</pre>
-              </div>
-            </aside>
-          </div>
-        </section>
-
-        <!-- ------------------------------------------------------------ PROMPTS -->
-        <section id="tab-prompts" class="tab-panel prompts-page" hidden>
-          <!-- linha 1: slot · versão · badge · Texto|Preview … layout · Ativar · Salvar -->
-          <div class="pp-head">
-            <div class="pp-head-left">
-              <div class="dd" id="dd-slot">
-                <button class="dd-trigger" id="dd-slot-btn" type="button" aria-haspopup="true" aria-expanded="false">
-                  <span id="dd-slot-label">—</span>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
-                </button>
-                <div class="dd-menu dd-menu-wide" id="dd-slot-menu" hidden>
-                  <div class="dd-search">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
-                    <input id="prompts-search" type="text" placeholder="Buscar slot…" aria-label="Buscar slot" />
-                  </div>
-                  <div class="dd-list" id="dd-slot-list"></div>
-                </div>
-              </div>
-
-              <div class="dd" id="dd-version">
-                <button class="dd-trigger" id="dd-version-btn" type="button" aria-haspopup="true" aria-expanded="false">
-                  <span id="dd-version-label">—</span>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
-                </button>
-                <div class="dd-menu" id="dd-version-menu" hidden>
-                  <div class="dd-list" id="dd-version-list"></div>
-                </div>
-                <div class="dd-menu dd-form" id="pv-new-menu" hidden>
-                  <label class="field">Nome<input id="pv-new-name" type="text" placeholder="v2" /></label>
-                  <label class="field">Nota<input id="pv-new-note" type="text" placeholder="o que muda nesta versão" /></label>
-                  <label class="switch"><input id="pv-new-activate" type="checkbox" checked /> ativar ao criar</label>
-                  <div class="dd-form-actions">
-                    <button type="button" id="pv-new-cancel">Cancelar</button>
-                    <button type="button" id="pv-new-create" class="green">Criar</button>
+              <aside class="lab-side">
+                <div class="lab-side-head">
+                  <div class="segmented" id="lab-side-tabs">
+                    <button type="button" data-pane="eventos" class="active">Eventos</button>
+                    <button type="button" data-pane="contexto">Contexto</button>
+                    <button type="button" data-pane="estado">Estado</button>
                   </div>
                 </div>
+                <div class="lab-pane" id="lab-pane-eventos">
+                  <div id="lab-events-list" class="events-list"></div>
+                </div>
+                <div class="lab-pane" id="lab-pane-contexto" hidden>
+                  <div id="lab-context-body" class="context-body">
+                    <p class="muted">Selecione um turno (bolha do lead) para ver o contexto.</p>
+                  </div>
+                </div>
+                <div class="lab-pane" id="lab-pane-estado" hidden>
+                  <pre id="lab-state-json">(sem sessão)</pre>
+                </div>
+              </aside>
+            </div>
+          </div>
+
+          <!-- ---------------------------------------------- Lab · Prompts -->
+          <div class="lab-sub" id="lab-sub-prompts" hidden>
+            <div class="prompts-page">
+              <!-- linha 1: slot · versão · badge · Texto|Preview … layout · Ativar · Salvar -->
+              <div class="pp-head">
+                <div class="pp-head-left">
+                  <div class="dd" id="dd-slot">
+                    <button class="dd-trigger" id="dd-slot-btn" type="button" aria-haspopup="true" aria-expanded="false">
+                      <span id="dd-slot-label">—</span>
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+                    </button>
+                    <div class="dd-menu dd-menu-wide" id="dd-slot-menu" hidden>
+                      <div class="dd-search">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
+                        <input id="prompts-search" type="text" placeholder="Buscar slot…" aria-label="Buscar slot" />
+                      </div>
+                      <div class="dd-list" id="dd-slot-list"></div>
+                    </div>
+                  </div>
+
+                  <div class="dd" id="dd-version">
+                    <button class="dd-trigger" id="dd-version-btn" type="button" aria-haspopup="true" aria-expanded="false">
+                      <span id="dd-version-label">—</span>
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+                    </button>
+                    <div class="dd-menu" id="dd-version-menu" hidden>
+                      <div class="dd-list" id="dd-version-list"></div>
+                    </div>
+                    <div class="dd-menu dd-form" id="pv-new-menu" hidden>
+                      <label class="field">Nome<input id="pv-new-name" type="text" placeholder="v2" /></label>
+                      <label class="field">Nota<input id="pv-new-note" type="text" placeholder="o que muda nesta versão" /></label>
+                      <label class="switch"><input id="pv-new-activate" type="checkbox" checked /> ativar ao criar</label>
+                      <div class="dd-form-actions">
+                        <button type="button" id="pv-new-cancel">Cancelar</button>
+                        <button type="button" id="pv-new-create" class="green">Criar</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <span class="badges" id="pv-badges"></span>
+
+                  <div class="segmented" id="pp-seg">
+                    <button type="button" data-view="editor">Texto</button>
+                    <button type="button" data-view="preview">Preview</button>
+                  </div>
+                </div>
+
+                <div class="pp-head-right">
+                  <div class="icon-group" id="pp-views">
+                    <button type="button" data-view="editor" title="Só o editor" aria-label="Só o editor">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+                    </button>
+                    <button type="button" data-view="split" title="Dividido" aria-label="Dividido">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M12 3v18" /></svg>
+                    </button>
+                    <button type="button" data-view="preview" title="Só o preview" aria-label="Só o preview">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></svg>
+                    </button>
+                  </div>
+                  <button type="button" id="pv-activate" class="green">Ativar</button>
+                  <button type="button" id="pv-save">Salvar</button>
+                </div>
               </div>
 
-              <span class="badges" id="pv-badges"></span>
+              <!-- linha 2: chips de placeholder · nota da versão · diff · apagar -->
+              <div class="pp-toolbar">
+                <div class="chips" id="pv-placeholders"></div>
+                <div class="pp-toolbar-right">
+                  <input type="text" id="pv-note" class="note-input" placeholder="nota da versão" aria-label="Nota da versão" />
+                  <button type="button" class="icon" id="pv-diff" title="Diff vs default" aria-label="Diff vs default">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="3" /><circle cx="19" cy="18" r="3" /><path d="M12 6h5a2 2 0 0 1 2 2v7" /><path d="M12 18H7a2 2 0 0 1-2-2V9" /></svg>
+                  </button>
+                  <button type="button" class="icon danger" id="pv-delete" title="Apagar versão" aria-label="Apagar versão">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /></svg>
+                  </button>
+                </div>
+              </div>
 
-              <div class="segmented" id="pp-seg">
-                <button type="button" data-view="editor">Texto</button>
-                <button type="button" data-view="preview">Preview</button>
+              <!-- corpo: editor mono | preview markdown -->
+              <div class="pp-body" id="pp-body" data-view="split">
+                <div class="pp-pane pp-pane-editor">
+                  <textarea id="prompts-editor" class="mono" spellcheck="false" aria-label="Texto do prompt"></textarea>
+                </div>
+                <div class="pp-pane pp-pane-preview">
+                  <div class="md-preview" id="prompts-preview"></div>
+                </div>
+              </div>
+
+              <!-- rodapé recolhível: chat do Lab embutido -->
+              <div class="pp-test">
+                <div class="pp-test-bar">
+                  <button type="button" id="test-toggle" class="test-toggle" aria-expanded="false" aria-controls="test-body">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+                    <span>Testar prompt</span>
+                    <svg class="test-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6" /></svg>
+                  </button>
+                  <a class="link" href="#lab/conversa" id="test-ver-eventos" hidden>ver eventos na Conversa</a>
+                </div>
+
+                <div class="pp-test-body" id="test-body" hidden></div>
               </div>
             </div>
-
-            <div class="pp-head-right">
-              <div class="icon-group" id="pp-views">
-                <button type="button" data-view="editor" title="Só o editor" aria-label="Só o editor">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
-                </button>
-                <button type="button" data-view="split" title="Dividido" aria-label="Dividido">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M12 3v18" /></svg>
-                </button>
-                <button type="button" data-view="preview" title="Só o preview" aria-label="Só o preview">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></svg>
-                </button>
-              </div>
-              <button type="button" id="pv-activate" class="green">Ativar</button>
-              <button type="button" id="pv-save">Salvar</button>
-            </div>
           </div>
 
-          <!-- linha 2: chips de placeholder · nota da versão · diff · apagar -->
-          <div class="pp-toolbar">
-            <div class="chips" id="pv-placeholders"></div>
-            <div class="pp-toolbar-right">
-              <input type="text" id="pv-note" class="note-input" placeholder="nota da versão" aria-label="Nota da versão" />
-              <button type="button" class="icon" id="pv-diff" title="Diff vs default" aria-label="Diff vs default">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="3" /><circle cx="19" cy="18" r="3" /><path d="M12 6h5a2 2 0 0 1 2 2v7" /><path d="M12 18H7a2 2 0 0 1-2-2V9" /></svg>
-              </button>
-              <button type="button" class="icon danger" id="pv-delete" title="Apagar versão" aria-label="Apagar versão">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18" /><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /></svg>
-              </button>
-            </div>
+          <!-- ---------------------------------------------- Lab · Tools -->
+          <div class="lab-sub lab-sub-pad" id="lab-sub-tools" hidden>
+            <p class="notice">guard_price não é configurável por regra.</p>
+            <div id="tools-cards" class="cards-grid"></div>
           </div>
-
-          <!-- corpo: editor mono | preview markdown -->
-          <div class="pp-body" id="pp-body" data-view="split">
-            <div class="pp-pane pp-pane-editor">
-              <textarea id="prompts-editor" class="mono" spellcheck="false" aria-label="Texto do prompt"></textarea>
-            </div>
-            <div class="pp-pane pp-pane-preview">
-              <div class="md-preview" id="prompts-preview"></div>
-            </div>
-          </div>
-
-          <!-- rodapé recolhível: chat do Lab embutido -->
-          <div class="pp-test">
-            <div class="pp-test-bar">
-              <button type="button" id="test-toggle" class="test-toggle" aria-expanded="false" aria-controls="test-body">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
-                <span>Testar prompt</span>
-                <svg class="test-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6" /></svg>
-              </button>
-              <a class="link" href="#lab" id="test-ver-eventos" hidden>ver eventos no Lab</a>
-            </div>
-
-            <div class="pp-test-body" id="test-body" hidden></div>
-          </div>
-        </section>
-
-        <!-- ------------------------------------------------------------ TOOLS -->
-        <section id="tab-tools" class="tab-panel pad" hidden>
-          <p class="notice">guard_price não é configurável por regra.</p>
-          <div id="tools-cards" class="cards-grid"></div>
         </section>
 
         <!-- ------------------------------------------------------------ CONFIG -->
@@ -199,7 +218,7 @@
           <div class="chat-foot-row">
             <select class="chat-api" aria-label="API de cotação" autocomplete="off"></select>
             <input type="text" class="chat-api-custom" placeholder="http://localhost:8000" aria-label="URL livre da API" autocomplete="off" hidden />
-            <button type="button" class="chip-ro chat-gemini" title="ver em Config">Gemini · —</button>
+            <select class="chat-model" aria-label="Modelo do Gemini" autocomplete="off"></select>
             <span class="muted chat-typing" hidden>digitando…</span>
           </div>
           <div class="composer">

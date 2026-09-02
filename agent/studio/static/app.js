@@ -34,7 +34,9 @@ async function api(path, opts = {}) {
   }
   if (!res.ok) {
     const detail = data && data.detail ? data.detail : `${res.status} ${res.statusText}`;
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    const erro = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    erro.status = res.status; // 404 numa rota nova = backend ainda não a implementou
+    throw erro;
   }
   return data;
 }
@@ -110,29 +112,62 @@ function badgeOrigem(origem) {
   return `<span class="badge ${classe}">${escapeHtml(origem)}</span>`;
 }
 
-// -------------------------------------------------------------------------- router (hash → aba)
-const TABS = ["lab", "prompts", "tools", "config"];
-const TAB_LABELS = { lab: "Lab", prompts: "Prompts", tools: "Tools", config: "Config" };
+// -------------------------------------------------------------------------- router (hash → aba/sub-aba)
+// `#atendimentos`, `#atendimentos/<cid>`, `#lab/conversa|prompts|tools`, `#config`.
+const TABS = ["atendimentos", "lab", "config"];
+const SUBS_LAB = ["conversa", "prompts", "tools"];
+const TAB_LABELS = { atendimentos: "Atendimentos", lab: "Lab", config: "Config" };
+const SUB_LABELS = { conversa: "Conversa", prompts: "Prompts", tools: "Tools" };
+const HASH_LEGADO = { prompts: "#lab/prompts", tools: "#lab/tools" }; // links da v1
 
 function abaAtual() {
-  const h = (location.hash || "#lab").slice(1);
-  return TABS.includes(h) ? h : "lab";
+  const bruto = (location.hash || "").replace(/^#/, "");
+  const partes = bruto.split("/");
+  const tab = partes[0];
+  const sub = partes.slice(1).join("/");
+  if (!TABS.includes(tab)) return { tab: "atendimentos", sub: "" };
+  if (tab === "lab") return { tab, sub: SUBS_LAB.includes(sub) ? sub : "conversa" };
+  return { tab, sub };
 }
 
-// Breadcrumb da barra superior: `<Aba> / <item>` (a marca à esquerda já diz "Studio").
-// Cada aba guarda o seu último item (label do slot, id curto da sessão…); Tools/Config não têm.
-const Breadcrumb = {
-  itens: { lab: null, prompts: null, tools: null, config: null },
+/** Manda o hash para a forma canônica; devolve true quando redirecionou (o hashchange refaz o render). */
+function normalizarHash() {
+  const bruto = (location.hash || "").replace(/^#/, "");
+  const raiz = bruto.split("/")[0];
+  if (HASH_LEGADO[raiz]) {
+    location.replace(HASH_LEGADO[raiz]);
+    return true;
+  }
+  if (!TABS.includes(raiz)) {
+    location.replace("#atendimentos"); // landing
+    return true;
+  }
+  if (raiz === "lab" && !SUBS_LAB.includes(bruto.split("/")[1] || "")) {
+    location.replace("#lab/conversa");
+    return true;
+  }
+  return false;
+}
 
-  set(tab, item) {
-    this.itens[tab] = item || null;
-    if (abaAtual() === tab) this.render();
+// Breadcrumb da barra superior: `Atendimentos / <cid>`, `Lab / Conversa / <id>`,
+// `Lab / Prompts / <slot>`, `Lab / Tools`, `Config`. A marca à esquerda já diz "Studio".
+const Breadcrumb = {
+  itens: { conversa: null, prompts: null },
+
+  set(chave, item) {
+    this.itens[chave] = item || null;
+    this.render();
   },
 
   render() {
-    const tab = abaAtual();
+    const { tab, sub } = abaAtual();
     const partes = [TAB_LABELS[tab]];
-    if (this.itens[tab]) partes.push(this.itens[tab]);
+    if (tab === "lab") {
+      partes.push(SUB_LABELS[sub]);
+      if (this.itens[sub]) partes.push(this.itens[sub]);
+    } else if (tab === "atendimentos" && sub) {
+      partes.push(sub);
+    }
     const box = el("breadcrumb");
     box.innerHTML = "";
     partes.forEach((parte, i) => {
@@ -151,16 +186,22 @@ const Breadcrumb = {
 };
 
 function renderTab() {
-  const tab = abaAtual();
+  if (normalizarHash()) return;
+  const { tab, sub } = abaAtual();
   for (const t of TABS) el(`tab-${t}`).hidden = t !== tab;
   document.querySelectorAll("#tabs a").forEach((a) => a.classList.toggle("active", a.dataset.tab === tab));
+  for (const s of SUBS_LAB) el(`lab-sub-${s}`).hidden = !(tab === "lab" && s === sub);
+  document.querySelectorAll("#lab-subtabs button").forEach((b) => {
+    b.classList.toggle("active", tab === "lab" && b.dataset.sub === sub);
+  });
+  el("lab-session-head").hidden = !(tab === "lab" && sub === "conversa");
   Breadcrumb.render();
-  onTabShown(tab);
+  onTabShown(tab, sub);
 }
 
-function onTabShown(tab) {
-  if (tab === "prompts") Prompts.load().catch((e) => toast(e.message, "error"));
-  if (tab === "tools") Tools.load().catch((e) => toast(e.message, "error"));
+function onTabShown(tab, sub) {
+  if (tab === "lab" && sub === "prompts") Prompts.load().catch((e) => toast(e.message, "error"));
+  if (tab === "lab" && sub === "tools") Tools.load().catch((e) => toast(e.message, "error"));
   if (tab === "config") Config.load().catch((e) => toast(e.message, "error"));
 }
 
@@ -187,6 +228,79 @@ const Health = {
     setInterval(() => this.check(), 15000);
   },
 };
+
+// -------------------------------------------------------------------------- catálogo de modelos
+// `GET /api/models` é rota nova: enquanto o backend não a tiver, 404 vira "indisponível" e a
+// lista fica só com o modelo em uso — sem erro na tela e sem travar o seletor.
+const ModelCatalog = {
+  modelos: [],
+  atualizadoEm: null,
+  disponivel: true,
+  ouvintes: new Set(),
+  _carregado: false,
+
+  subscribe(fn) {
+    this.ouvintes.add(fn);
+  },
+
+  _emitir() {
+    for (const fn of this.ouvintes) fn();
+  },
+
+  /** Lista para os selects, sempre contendo o modelo em uso (mesmo fora do catálogo). */
+  lista(atual) {
+    const emUso = atual || LabSession.geminiModel;
+    const itens = this.modelos.slice();
+    if (emUso && !itens.some((m) => m.id === emUso)) itens.unshift({ id: emUso, nome: emUso });
+    return itens;
+  },
+
+  aplicar(data) {
+    this.modelos = Array.isArray(data.modelos) ? data.modelos : [];
+    this.atualizadoEm = data.atualizado_em || null;
+    this.disponivel = true;
+    this._emitir();
+  },
+
+  async carregar() {
+    if (this._carregado) return;
+    this._carregado = true;
+    try {
+      this.aplicar(await api("/api/models"));
+    } catch (err) {
+      if (err.status === 404) this.disponivel = false;
+      else toast(err.message || String(err), "error");
+      this._emitir();
+    }
+  },
+
+  async refresh() {
+    this.aplicar(await api("/api/models/refresh", { method: "POST" }));
+    toast(`${this.modelos.length} modelos · atualizado ${formatarData(this.atualizadoEm)}`, "success");
+  },
+};
+
+function formatarData(iso) {
+  if (!iso) return "agora";
+  const data = new Date(iso);
+  if (Number.isNaN(data.getTime())) return iso;
+  return data.toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function opcoesModelo(atual) {
+  return ModelCatalog.lista(atual)
+    .map((m) => `<option value="${escapeHtml(m.id)}"${m.id === atual ? " selected" : ""}>${escapeHtml(m.nome || m.id)}</option>`)
+    .join("");
+}
+
+/** Troca o modelo ativo (override em settings) e faz Lab e Config refletirem. */
+async function aplicarModelo(id) {
+  if (!id || id === LabSession.geminiModel) return;
+  await api("/api/config", { method: "PUT", body: { gemini_model: id } });
+  await LabSession.carregarEfetivo();
+  toast(`modelo aplicado: ${id}`, "success");
+  if (abaAtual().tab === "config") await Config.load();
+}
 
 // -------------------------------------------------------------------------- dropdowns (popover)
 // Um só aberto por vez; fecha em clique fora e no Esc. O menu é irmão do gatilho dentro de `.dd`
@@ -783,7 +897,7 @@ const Tools = {
 const Config = {
   effective: null,
   campos: [
-    { key: "gemini_model", label: "Modelo Gemini", type: "text" },
+    { key: "gemini_model", label: "Modelo Gemini", type: "select", wide: true },
     {
       key: "responder_history_runs",
       label: "Janela de contexto do Responder",
@@ -804,13 +918,40 @@ const Config = {
     this.render();
   },
 
+  /** Modelo do Gemini: select do catálogo + "Atualizar modelos" (consulta a API do Google). */
+  celulaModelo(def, campo) {
+    const aviso = ModelCatalog.disponivel
+      ? ""
+      : '<span class="field-help">catálogo indisponível nesta versão do backend — mostrando só o modelo em uso</span>';
+    return `<div class="field-cell wide">
+      <div class="field-head">
+        <span class="field-label">${escapeHtml(def.label)}</span>
+        <span class="field-meta">${badgeOrigem(campo.origem)}${campo.origem === "override" ? botaoReset(def.key) : ""}</span>
+      </div>
+      <div class="field-dupla">
+        <select id="cfg-${def.key}">${opcoesModelo(campo.value)}</select>
+        <button type="button" class="cfg-modelos-refresh" ${ModelCatalog.disponivel ? "" : 'disabled title="rota /api/models ainda não existe neste backend"'}>${icon("reset")} Atualizar modelos</button>
+      </div>
+      ${aviso}
+    </div>`;
+  },
+
+  ligarRefreshModelos(card) {
+    const btn = card.querySelector(".cfg-modelos-refresh");
+    if (!btn) return;
+    btn.addEventListener("click", withLoading(btn, () => ModelCatalog.refresh()));
+  },
+
   render() {
     const card = el("config-card");
-    const celulas = this.campos.map((def) => campoHtml(`cfg-${def.key}`, def, this.effective[def.key], def.key)).join("");
+    const celulas = this.campos
+      .map((def) => (def.type === "select" ? this.celulaModelo(def, this.effective[def.key]) : campoHtml(`cfg-${def.key}`, def, this.effective[def.key], def.key)))
+      .join("");
     card.innerHTML = `<h3>settings</h3>
       <div class="card-grid">${celulas}</div>
       <div class="card-actions"><button type="button" class="primary save-btn">Salvar</button></div>`;
     ligarSwitches(card);
+    this.ligarRefreshModelos(card);
 
     card.querySelectorAll(".reset-btn").forEach((btn) => {
       btn.addEventListener(
@@ -1137,7 +1278,13 @@ function criarChat(container, opts) {
       opcoes.push('<option value="__livre">URL livre…</option>');
       select.innerHTML = opcoes.join("");
       chat.refletirApi();
-      q(".chat-gemini").textContent = `Gemini · ${LabSession.geminiModel || "—"}`;
+      chat.preencherModelos();
+    },
+
+    preencherModelos() {
+      const modelo = q(".chat-model");
+      modelo.innerHTML = opcoesModelo(LabSession.geminiModel);
+      modelo.value = LabSession.geminiModel || "";
     },
 
     refletirApi() {
@@ -1181,8 +1328,14 @@ function criarChat(container, opts) {
     input.value = "";
     input.focus();
   });
-  q(".chat-gemini").addEventListener("click", () => {
-    location.hash = "#config";
+  q(".chat-model").addEventListener("change", async () => {
+    const modelo = q(".chat-model");
+    try {
+      await aplicarModelo(modelo.value);
+    } catch (err) {
+      toast(err.message || String(err), "error");
+      chat.preencherModelos(); // falhou: volta a mostrar o modelo que está valendo
+    }
   });
   select.addEventListener("change", () => {
     const livre = select.value === "__livre";
@@ -1198,6 +1351,7 @@ function criarChat(container, opts) {
   }
 
   LabSession.subscribe((msg) => chat.onSessao(msg));
+  ModelCatalog.subscribe(() => chat.preencherModelos());
   return chat;
 }
 
@@ -1222,6 +1376,11 @@ const Lab = {
     const btnNova = el("lab-new-session");
     btnNova.addEventListener("click", withLoading(btnNova, () => LabSession.novaSessao()));
     el("lab-copy-id").addEventListener("click", () => this.copiarId());
+    document.querySelectorAll("#lab-subtabs button").forEach((b) => {
+      b.addEventListener("click", () => {
+        location.hash = `#lab/${b.dataset.sub}`;
+      });
+    });
     document.querySelectorAll("#lab-side-tabs button").forEach((b) => {
       b.addEventListener("click", () => this.mostrarPainel(b.dataset.pane));
     });
@@ -1255,7 +1414,7 @@ const Lab = {
     this.turnoSelecionado = null;
     el("lab-session-id").textContent = LabSession.id;
     el("lab-copy-id").disabled = false;
-    Breadcrumb.set("lab", String(LabSession.id).slice(0, 8));
+    Breadcrumb.set("conversa", String(LabSession.id).slice(0, 8));
     el("lab-events-list").innerHTML = "";
     el("lab-context-body").innerHTML = '<p class="muted">Selecione um turno (bolha do lead) para ver o contexto.</p>';
     el("lab-state-json").textContent = "(sem turnos ainda)";
@@ -1376,8 +1535,9 @@ function atalhos() {
       Prompts.fecharDiff();
       return;
     }
+    const emPrompts = abaAtual().tab === "lab" && abaAtual().sub === "prompts";
     if ((ev.metaKey || ev.ctrlKey) && (ev.key === "s" || ev.key === "S")) {
-      if (abaAtual() !== "prompts") return;
+      if (!emPrompts) return;
       ev.preventDefault();
       const salvar = el("pv-save");
       if (!salvar.disabled) salvar.click();
@@ -1385,7 +1545,7 @@ function atalhos() {
     }
     const alvo = ev.target;
     const digitando = alvo && (alvo.tagName === "INPUT" || alvo.tagName === "TEXTAREA" || alvo.isContentEditable);
-    if (ev.key === "/" && !digitando && abaAtual() === "prompts") {
+    if (ev.key === "/" && !digitando && emPrompts) {
       ev.preventDefault();
       Prompts.abrirBuscaSlot();
     }
@@ -1399,7 +1559,12 @@ document.addEventListener("DOMContentLoaded", () => {
   Lab.init();
   TestPanel.init();
   atalhos();
-  LabSession.carregarEfetivo().catch((err) => toast(err.message, "error"));
+  ModelCatalog.subscribe(() => {
+    if (Config.effective) Config.render(); // refresh do catálogo repinta o select da ficha
+  });
+  LabSession.carregarEfetivo()
+    .then(() => ModelCatalog.carregar())
+    .catch((err) => toast(err.message, "error"));
   LabSession.iniciar(); // retoma a sessão desta aba, se ainda existir no servidor
   renderTab();
 });
