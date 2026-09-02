@@ -94,6 +94,17 @@ function badgeEl(texto, classe = "") {
   return span;
 }
 
+// ícones inline (Lucide, 16px stroke 1.5) para o HTML gerado em string pelas fichas
+const ICONS = {
+  reset: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" />',
+  remove: '<path d="M18 6 6 18" /><path d="m6 6 12 12" />',
+  plus: '<path d="M12 5v14" /><path d="M5 12h14" />',
+};
+
+function icon(nome) {
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${ICONS[nome]}</svg>`;
+}
+
 function badgeOrigem(origem) {
   const classe = origem === "override" ? "badge-origem-override" : origem.startsWith("env:") ? "badge-origem-env" : "badge-origem-default";
   return `<span class="badge ${classe}">${escapeHtml(origem)}</span>`;
@@ -557,6 +568,46 @@ const Prompts = {
   },
 };
 
+// -------------------------------------------------------------------------- fichas (Tools/Config)
+// Uma célula por campo: rótulo + badge de origem + "voltar ao padrão" (só quando há override)
+// em cima, controle embaixo. As fichas são grades de 2 colunas; campo largo ocupa a linha toda.
+function campoHtml(id, def, campo, path) {
+  const controle =
+    def.type === "switch"
+      ? `<label class="switch"><input type="checkbox" id="${id}" ${campo.value ? "checked" : ""} /><span>${campo.value ? "ligado" : "desligado"}</span></label>`
+      : `<input type="${def.type}" id="${id}" value="${escapeHtml(campo.value ?? "")}" ${def.step ? `step="${def.step}"` : ""} />`;
+  return `<div class="field-cell${def.wide ? " wide" : ""}">
+      <div class="field-head">
+        <span class="field-label">${escapeHtml(def.label)}</span>
+        <span class="field-meta">${badgeOrigem(campo.origem)}${campo.origem === "override" ? botaoReset(path) : ""}</span>
+      </div>
+      ${controle}
+      ${def.help ? `<span class="field-help">${escapeHtml(def.help)}</span>` : ""}
+    </div>`;
+}
+
+function botaoReset(path) {
+  return `<button type="button" class="icon reset-btn" data-path="${escapeHtml(path)}" title="voltar ao padrão" aria-label="voltar ao padrão">${icon("reset")}</button>`;
+}
+
+/** Toggle visual: o texto ao lado acompanha o estado. */
+function ligarSwitches(root) {
+  root.querySelectorAll(".switch input").forEach((input) => {
+    const texto = input.nextElementSibling;
+    if (!texto) return;
+    input.addEventListener("change", () => {
+      texto.textContent = input.checked ? "ligado" : "desligado";
+    });
+  });
+}
+
+function lerCampo(id, def) {
+  const campo = document.getElementById(id);
+  if (def.type === "switch") return campo.checked;
+  if (def.type === "number") return Number(campo.value);
+  return campo.value;
+}
+
 // -------------------------------------------------------------------------- aba Tools
 const Tools = {
   effective: null,
@@ -568,55 +619,38 @@ const Tools = {
   },
 
   render() {
-    const container = document.getElementById("tools-cards");
+    const container = el("tools-cards");
     container.innerHTML = "";
     container.appendChild(this.renderQuoteClientCard());
     container.appendChild(
-      this.renderCard("viacep", "ViaCEP", [
+      this.renderCard("viacep", "viacep", [
         { key: "enabled", label: "Habilitado", type: "switch" },
-        { key: "url", label: "URL", type: "text" },
         { key: "timeout_s", label: "Timeout (s)", type: "number", step: "0.1" },
+        { key: "url", label: "URL", type: "text", wide: true },
       ])
     );
     container.appendChild(
-      this.renderCard("policy", "Policy", [
+      this.renderCard("policy", "policy", [
         { key: "max_turnos_sem_progresso", label: "Máx. turnos sem progresso", type: "number" },
         { key: "max_cep_tentativas", label: "Máx. tentativas de CEP", type: "number" },
         { key: "objecoes_ate_handoff", label: "Objeções até handoff", type: "number" },
       ])
     );
     container.appendChild(
-      this.renderCard("rules", "Rules", [{ key: "pre_validacao_local", label: "Pré-validação local", type: "switch" }])
+      this.renderCard("rules", "rules", [
+        { key: "pre_validacao_local", label: "Pré-validação local", type: "switch", help: "valida idade, ano e CEP antes de chamar a API" },
+      ])
     );
-  },
-
-  fieldRowHtml(grupo, def, campo) {
-    const id = `tool-${grupo}-${def.key}`;
-    const inputHtml =
-      def.type === "switch"
-        ? `<label class="switch"><input type="checkbox" id="${id}" ${campo.value ? "checked" : ""} /> ${escapeHtml(def.label)}</label>`
-        : `<label class="field">${escapeHtml(def.label)}
-            <input type="${def.type}" id="${id}" value="${escapeHtml(campo.value ?? "")}" ${def.step ? `step="${def.step}"` : ""} /></label>`;
-    return `<div class="card-row">
-      ${inputHtml}
-      ${badgeOrigem(campo.origem)}
-      ${campo.origem === "override" ? `<button type="button" class="small reset-btn" data-path="${grupo}/${def.key}">voltar ao padrão</button>` : ""}
-    </div>`;
-  },
-
-  lerCampo(id, def) {
-    const el = document.getElementById(id);
-    if (def.type === "switch") return el.checked;
-    if (def.type === "number") return Number(el.value);
-    return el.value;
   },
 
   renderCard(grupo, titulo, campos) {
     const div = document.createElement("div");
     div.className = "card";
-    const corpo = campos.map((def) => this.fieldRowHtml(grupo, def, this.effective[grupo][def.key])).join("");
-    div.innerHTML = `<h3>${escapeHtml(titulo)}</h3>${corpo}
+    const celulas = campos.map((def) => campoHtml(`tool-${grupo}-${def.key}`, def, this.effective[grupo][def.key], `${grupo}/${def.key}`)).join("");
+    div.innerHTML = `<h3>${escapeHtml(titulo)}</h3>
+      <div class="card-grid">${celulas}</div>
       <div class="card-actions"><button type="button" class="primary save-btn">Salvar</button></div>`;
+    ligarSwitches(div);
     this.wireResetButtons(div);
     const btn = div.querySelector(".save-btn");
     btn.addEventListener(
@@ -624,9 +658,8 @@ const Tools = {
       withLoading(btn, async () => {
         const patch = {};
         for (const def of campos) {
-          const novo = this.lerCampo(`tool-${grupo}-${def.key}`, def);
-          const atual = this.effective[grupo][def.key].value;
-          if (novo !== atual) patch[def.key] = novo;
+          const novo = lerCampo(`tool-${grupo}-${def.key}`, def);
+          if (novo !== this.effective[grupo][def.key].value) patch[def.key] = novo;
         }
         if (Object.keys(patch).length === 0) {
           toast("nada para salvar");
@@ -642,9 +675,7 @@ const Tools = {
 
   renderEndpointRows(container, endpoints) {
     container.innerHTML = "";
-    for (const [label, url] of Object.entries(endpoints)) {
-      this.addEndpointRow(container, label, url);
-    }
+    for (const [label, url] of Object.entries(endpoints)) this.addEndpointRow(container, label, url);
   },
 
   addEndpointRow(container, label = "", url = "") {
@@ -652,7 +683,7 @@ const Tools = {
     row.className = "endpoint-row";
     row.innerHTML = `<input type="text" class="ep-label" placeholder="rótulo" value="${escapeHtml(label)}" />
       <input type="text" class="ep-url" placeholder="http://..." value="${escapeHtml(url)}" />
-      <button type="button" class="small ep-remove">remover</button>`;
+      <button type="button" class="icon ep-remove" title="remover endpoint" aria-label="remover endpoint">${icon("remove")}</button>`;
     row.querySelector(".ep-remove").addEventListener("click", () => row.remove());
     container.appendChild(row);
   },
@@ -668,33 +699,35 @@ const Tools = {
       .join("");
     div.innerHTML = `
       <h3>quote_client</h3>
-      <div class="card-row">
-        <label class="field">base_url — endpoint conhecido
-          <select id="tool-qc-base_url-select"><option value="">(usar campo livre abaixo)</option>${options}</select>
-        </label>
+      <div class="card-grid">
+        <div class="field-cell wide">
+          <div class="field-head">
+            <span class="field-label">base_url</span>
+            <span class="field-meta">${badgeOrigem(g.base_url.origem)}${g.base_url.origem === "override" ? botaoReset("quote_client/base_url") : ""}</span>
+          </div>
+          <div class="field-dupla">
+            <select id="tool-qc-base_url-select"><option value="">endpoint conhecido…</option>${options}</select>
+            <input type="text" id="tool-quote_client-base_url" value="${escapeHtml(g.base_url.value ?? "")}" aria-label="base_url" />
+          </div>
+        </div>
+        <div class="field-cell wide">
+          <div class="field-head">
+            <span class="field-label">endpoints</span>
+            <span class="field-meta">${badgeOrigem(g.endpoints.origem)}${g.endpoints.origem === "override" ? botaoReset("quote_client/endpoints") : ""}</span>
+          </div>
+          <div id="tool-endpoints-rows"></div>
+          <button type="button" id="tool-endpoints-add" class="small">${icon("plus")} endpoint</button>
+        </div>
+        ${campoHtml("tool-quote_client-timeout_s", { key: "timeout_s", label: "timeout_s", type: "number", step: "0.1" }, g.timeout_s, "quote_client/timeout_s")}
+        ${campoHtml("tool-quote_client-max_attempts", { key: "max_attempts", label: "max_attempts", type: "number" }, g.max_attempts, "quote_client/max_attempts")}
+        ${campoHtml("tool-quote_client-budget_s", { key: "budget_s", label: "budget_s", type: "number", step: "0.5" }, g.budget_s, "quote_client/budget_s")}
+        ${campoHtml("tool-quote_client-backoff_base_s", { key: "backoff_base_s", label: "backoff_base_s", type: "number", step: "0.1" }, g.backoff_base_s, "quote_client/backoff_base_s")}
       </div>
-      <div class="card-row">
-        <label class="field">base_url
-          <input type="text" id="tool-quote_client-base_url" value="${escapeHtml(g.base_url.value ?? "")}" /></label>
-        ${badgeOrigem(g.base_url.origem)}
-        ${g.base_url.origem === "override" ? '<button type="button" class="small reset-btn" data-path="quote_client/base_url">voltar ao padrão</button>' : ""}
-      </div>
-      <div class="card-row" style="align-items:flex-start;flex-direction:column">
-        <span class="muted">endpoints</span>
-        <div id="tool-endpoints-rows"></div>
-        <button type="button" id="tool-endpoints-add" class="small">+ endpoint</button>
-        ${badgeOrigem(g.endpoints.origem)}
-        ${g.endpoints.origem === "override" ? '<button type="button" class="small reset-btn" data-path="quote_client/endpoints">voltar ao padrão</button>' : ""}
-      </div>
-      ${this.fieldRowHtml(grupo, { key: "timeout_s", label: "timeout_s", type: "number", step: "0.1" }, g.timeout_s)}
-      ${this.fieldRowHtml(grupo, { key: "max_attempts", label: "max_attempts", type: "number" }, g.max_attempts)}
-      ${this.fieldRowHtml(grupo, { key: "budget_s", label: "budget_s", type: "number", step: "0.5" }, g.budget_s)}
-      ${this.fieldRowHtml(grupo, { key: "backoff_base_s", label: "backoff_base_s", type: "number", step: "0.1" }, g.backoff_base_s)}
       <div class="card-actions"><button type="button" class="primary save-btn">Salvar</button></div>
     `;
-    const endpointsContainer = div.querySelector("#tool-endpoints-rows");
-    this.renderEndpointRows(endpointsContainer, endpoints);
-    div.querySelector("#tool-endpoints-add").addEventListener("click", () => this.addEndpointRow(endpointsContainer));
+    const linhas = div.querySelector("#tool-endpoints-rows");
+    this.renderEndpointRows(linhas, endpoints);
+    div.querySelector("#tool-endpoints-add").addEventListener("click", () => this.addEndpointRow(linhas));
     div.querySelector("#tool-qc-base_url-select").addEventListener("change", (e) => {
       if (e.target.value) div.querySelector("#tool-quote_client-base_url").value = e.target.value;
     });
@@ -709,7 +742,7 @@ const Tools = {
         if (baseUrl !== g.base_url.value) patch.base_url = baseUrl;
 
         const novosEndpoints = {};
-        endpointsContainer.querySelectorAll(".endpoint-row").forEach((row) => {
+        linhas.querySelectorAll(".endpoint-row").forEach((row) => {
           const label = row.querySelector(".ep-label").value.trim();
           const url = row.querySelector(".ep-url").value.trim();
           if (label && url) novosEndpoints[label] = url;
@@ -717,7 +750,7 @@ const Tools = {
         if (JSON.stringify(novosEndpoints) !== JSON.stringify(endpoints)) patch.endpoints = novosEndpoints;
 
         for (const key of ["timeout_s", "max_attempts", "budget_s", "backoff_base_s"]) {
-          const novo = Number(document.getElementById(`tool-quote_client-${key}`).value);
+          const novo = Number(el(`tool-quote_client-${key}`).value);
           if (novo !== g[key].value) patch[key] = novo;
         }
         if (Object.keys(patch).length === 0) {
@@ -762,7 +795,7 @@ const Config = {
     { key: "llm_max_tentativas", label: "Máx. tentativas do LLM", type: "number" },
     { key: "llm_budget_s", label: "Orçamento do LLM (s)", type: "number", step: "0.5" },
     { key: "script_delay_s", label: "Delay do roteiro do CLI (s)", type: "number", step: "0.1" },
-    { key: "agent_db_path", label: "Caminho do banco do agente", type: "text" },
+    { key: "agent_db_path", label: "Caminho do banco do agente", type: "text", wide: true },
   ],
 
   async load() {
@@ -772,42 +805,31 @@ const Config = {
   },
 
   render() {
-    const el = document.getElementById("config-card");
-    el.innerHTML =
-      "<h3>settings</h3>" +
-      this.campos
-        .map((def) => {
-          const campo = this.effective[def.key];
-          const id = `cfg-${def.key}`;
-          return `<div class="card-row">
-        <label class="field">${escapeHtml(def.label)}${def.help ? `<span class="muted"> — ${escapeHtml(def.help)}</span>` : ""}
-          <input type="${def.type}" id="${id}" value="${escapeHtml(campo.value ?? "")}" ${def.step ? `step="${def.step}"` : ""} /></label>
-        ${badgeOrigem(campo.origem)}
-        ${campo.origem === "override" ? `<button type="button" class="small reset-btn" data-key="${def.key}">voltar ao padrão</button>` : ""}
-      </div>`;
-        })
-        .join("") +
-      '<div class="card-actions"><button type="button" class="primary save-btn">Salvar</button></div>';
+    const card = el("config-card");
+    const celulas = this.campos.map((def) => campoHtml(`cfg-${def.key}`, def, this.effective[def.key], def.key)).join("");
+    card.innerHTML = `<h3>settings</h3>
+      <div class="card-grid">${celulas}</div>
+      <div class="card-actions"><button type="button" class="primary save-btn">Salvar</button></div>`;
+    ligarSwitches(card);
 
-    el.querySelectorAll(".reset-btn").forEach((btn) => {
+    card.querySelectorAll(".reset-btn").forEach((btn) => {
       btn.addEventListener(
         "click",
         withLoading(btn, async () => {
-          await api(`/api/config/${btn.dataset.key}`, { method: "DELETE" });
+          await api(`/api/config/${btn.dataset.path}`, { method: "DELETE" });
           await this.load();
           toast("aplicado", "success");
         })
       );
     });
 
-    const btn = el.querySelector(".save-btn");
+    const btn = card.querySelector(".save-btn");
     btn.addEventListener(
       "click",
       withLoading(btn, async () => {
         const patch = {};
         for (const def of this.campos) {
-          const raw = document.getElementById(`cfg-${def.key}`).value;
-          const novo = def.type === "number" ? Number(raw) : raw;
+          const novo = lerCampo(`cfg-${def.key}`, def);
           if (novo !== this.effective[def.key].value) patch[def.key] = novo;
         }
         if (Object.keys(patch).length === 0) {

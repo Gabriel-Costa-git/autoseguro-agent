@@ -58,3 +58,13 @@ def test_index_tem_data_tab_para_as_quatro_abas(client: TestClient):
     assert resp.status_code == 200
     for aba in ("lab", "prompts", "tools", "config"):
         assert f'data-tab="{aba}"' in resp.text
+
+
+def test_markdown_js_e_servido_em_static(client: TestClient):
+    """O preview da aba Prompts importa `markdown.js`: se ele não for servido, o módulo
+    `app.js` inteiro quebra no import e a UI não sobe."""
+    resp = client.get("/static/markdown.js")
+    assert resp.status_code == 200
+    assert "javascript" in resp.headers["content-type"] or "ecmascript" in resp.headers["content-type"]
+    assert "renderMarkdown" in resp.text
+    assert "./markdown.js" in client.get("/static/app.js").text

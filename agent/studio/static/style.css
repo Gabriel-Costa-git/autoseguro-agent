@@ -54,7 +54,7 @@ svg { flex: none; }
 .shell { display: flex; flex-direction: column; height: 100vh; width: 100%; min-width: 1100px; }
 
 .topbar {
-  flex: 0 0 var(--topbar-h); height: var(--topbar-h);
+  flex: none; min-height: var(--topbar-h);
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
   padding: 0 16px; background: var(--bg); border-bottom: 1px solid var(--border);
 }
@@ -153,7 +153,17 @@ button.loading::after {
 .icon-group button.active { background: var(--surface-3); color: #fff; }
 
 .switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; color: var(--text-2); font-size: 12px; }
-.switch input { width: 32px; height: 18px; accent-color: var(--accent); cursor: pointer; }
+.switch input {
+  appearance: none; -webkit-appearance: none; position: relative; flex: none; cursor: pointer;
+  width: 36px; height: 20px; margin: 0; border-radius: 999px;
+  background: var(--surface-3); border: 1px solid var(--border); transition: background .15s, border-color .15s;
+}
+.switch input::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--text-muted); transition: transform .15s, background .15s;
+}
+.switch input:checked { background: #17381f; border-color: #245f40; }
+.switch input:checked::after { transform: translateX(16px); background: var(--success); }
 
 /* ---------------------------------------------------------------- badges */
 .badge {
@@ -188,16 +198,28 @@ button.loading::after {
 .toast.error { background: var(--danger-bg); border-color: #4a1f1f; color: #fca5a5; }
 .toast.success { background: var(--success-bg); border-color: #1c5136; color: #86efac; }
 
-/* ---------------------------------------------------------------- cards (Tools/Config) */
-.cards-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 14px; }
+/* ---------------------------------------------------------------- fichas (Tools/Config) */
+.cards-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap: 14px; align-items: start; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px; }
-.card h3 { margin-bottom: 12px; font-family: var(--font-mono); text-transform: none; letter-spacing: 0; color: var(--text); }
-.card-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-.card-row label.field { flex: 1; min-width: 0; }
-.card-row .badge { flex: none; }
-.card-actions { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); display: flex; gap: 8px; }
-.endpoint-row { display: flex; gap: 6px; margin-bottom: 6px; width: 100%; }
-.endpoint-row input { flex: 1; }
+.card h3 { margin-bottom: 14px; font-family: var(--font-mono); font-size: 13px; text-transform: none; letter-spacing: 0; color: var(--text); }
+.card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+#config-card { max-width: 940px; } /* ficha única: campo de 700px em tela larga não ajuda ninguém */
+.field-cell { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.field-cell.wide { grid-column: 1 / -1; }
+/* badge longo (env:VAR) cai para a linha de baixo em vez de espremer o rótulo */
+.field-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-height: 22px; }
+.field-label { font-size: 12px; color: var(--text-2); }
+.field-meta { display: inline-flex; align-items: center; gap: 6px; flex: none; } /* badge e reset quebram juntos */
+.field-head .icon { width: 22px; height: 22px; flex: none; background: none; border: none; color: var(--text-muted); }
+.field-head .icon:hover:not(:disabled) { background: var(--surface-2); border: none; color: var(--text); }
+.field-help { font-size: 11px; line-height: 1.5; color: var(--text-muted); }
+.field-dupla { display: flex; gap: 8px; min-width: 0; }
+.field-dupla select { width: 200px; flex: none; }
+.field-dupla input { min-width: 0; }
+.card-actions { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); display: flex; gap: 8px; }
+.endpoint-row { display: flex; gap: 6px; margin-bottom: 6px; }
+.endpoint-row input { flex: 1; min-width: 0; }
+.endpoint-row .icon { flex: none; }
 
 /* ---------------------------------------------------------------- dropdowns (popover) */
 .dd { position: relative; display: inline-flex; }
@@ -345,3 +367,15 @@ button.loading::after {
   background: var(--bg); border: 1px solid var(--border); border-radius: 6px; max-height: 240px; overflow: auto;
 }
 .trace-block div > div { font-size: 12.5px; color: var(--text-2); margin-bottom: 2px; }
+
+/* ---------------------------------------------------------------- abaixo de 1100px: empilha */
+@media (max-width: 1100px) {
+  .shell { min-width: 0; }
+  .topbar { flex-wrap: wrap; gap: 8px 14px; padding: 8px 16px; }
+  .cards-grid, .card-grid { grid-template-columns: 1fr; }
+  .lab-body { grid-template-columns: 1fr; grid-template-rows: 1fr minmax(200px, 40%); }
+  .lab-side { border-left: none; border-top: 1px solid var(--border); }
+  .pp-body[data-view="split"] { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+  .pp-body[data-view="split"] .pp-pane-preview { border-left: none; border-top: 1px solid var(--border); }
+  .dd-menu-wide { width: 320px; }
+}

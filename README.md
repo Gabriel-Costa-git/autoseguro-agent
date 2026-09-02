@@ -235,23 +235,38 @@ scripts/quote_api_falha.sh             # opcional: API de cotação com falha fo
 ```
 
 Painel de operador, só em `127.0.0.1`, fora do canal Evolution (`agent/serve.py` não sabe que
-ele existe). Quatro abas:
+ele existe). Tema dark, sem framework, sem bundler e sem nada vindo de CDN: HTML, CSS e dois
+módulos ES servidos do disco. Uma barra superior de 56 px carrega a marca, o breadcrumb
+(`Prompts / <slot>`, `Lab / <sessão>`) e as quatro abas como links segmentados, com o
+indicador de saúde à direita; o hash da URL (`#lab`, `#prompts`, `#tools`, `#config`) é quem
+manda. Lab e "Testar prompt" dividem o mesmo componente de chat e a MESMA sessão do Lab —
+uma por aba do navegador, que sobrevive ao reload em vez de abrir outra. Quatro abas:
 
 - **Lab** — conversa como lead usando o mesmo `Conversation.handle` da entrega (nunca uma
-  cópia). Ao lado, os eventos ao vivo do turno (extração, decisão da policy, cada tentativa
-  da `/quote` com status e latência, consulta ao ViaCEP, handoff) e o inspetor de **contexto**:
-  o payload exato de cada chamada ao modelo, com as instruções renderizadas, o histórico
-  enviado, a entrada e a saída. Seletor de API de cotação (docker na 8000, falha forçada na 8001).
-- **Prompts** — cada texto do agente é um *slot* com versões nomeadas e uma ativa: prompts do
-  Extractor e do Responder, exemplos de intent, diretivas por campo, fallbacks anti-preço,
-  textos da policy, templates do presenter (cotação, planos, recusa, handoff por motivo) e
-  textos da orquestração. Salvar aplica na hora, sem reiniciar.
-- **Tools** — ficha de cada componente: `quote_client` (endpoints, timeout, tentativas,
-  orçamento, backoff), ViaCEP (liga/desliga, URL, timeout), policy (limites de estagnação,
-  tentativas de CEP, objeções até handoff) e regras (pré-validação local liga/desliga).
-- **Config** — modelo do Gemini, janela de contexto do Responder (quantas mensagens do
-  histórico vão em cada chamada; o Extractor é sem histórico por desenho), temperaturas,
-  retry do LLM, delay do roteiro e caminho do banco de sessão.
+  cópia). O chat ocupa o centro (bolhas do lead à direita, do agente à esquerda com a etiqueta
+  `template`/`llm`) e o painel de 380 px à direita tem três sub-abas: **Eventos** ao vivo do
+  turno (extração, decisão da policy, cada tentativa da `/quote` com status e latência, ViaCEP,
+  handoff), **Contexto** — o payload exato de cada chamada ao modelo, com as instruções
+  renderizadas, o histórico enviado, a entrada e a saída — e **Estado**, o `LeadState` da
+  sessão. Clicar numa bolha seleciona o turno. Na barra do chat, o seletor de API de cotação
+  (docker na 8000, falha forçada na 8001) mostra a URL em uso pela sessão.
+- **Prompts** — uma página de editor: dropdown de slot com busca (`/` foca) e itens agrupados,
+  dropdown de versão, selo `Ativa`/`Rascunho`/`Default · imutável`, e os botões **Ativar** e
+  **Salvar** (`Cmd/Ctrl+S`). O corpo alterna entre editor mono, preview de markdown e os dois
+  lado a lado; os chips dos placeholders do slot inserem `{campo}` no cursor, e *Diff vs
+  default* abre em painel lateral. Cada texto do agente é um *slot* com versões nomeadas e uma
+  ativa: prompts do Extractor e do Responder, exemplos de intent, diretivas por campo,
+  fallbacks anti-preço, textos da policy, templates do presenter (cotação, planos, recusa,
+  handoff por motivo) e textos da orquestração. Salvar aplica na hora, sem reiniciar. No rodapé,
+  **Testar prompt** abre o chat do Lab embutido para conversar sem trocar de aba.
+- **Tools** — ficha de cada componente, em grade de dois campos por linha: `quote_client`
+  (endpoints, timeout, tentativas, orçamento, backoff), ViaCEP (liga/desliga, URL, timeout),
+  policy (limites de estagnação, tentativas de CEP, objeções até handoff) e regras
+  (pré-validação local liga/desliga). Cada campo mostra a origem do valor efetivo em um selo
+  (`default`, `env:VAR`, `override`) e, quando há override, um botão para voltar ao padrão.
+- **Config** — mesma ficha para os `settings`: modelo do Gemini, janela de contexto do
+  Responder (quantas mensagens do histórico vão em cada chamada; o Extractor é sem histórico
+  por desenho), temperaturas, retry do LLM, delay do roteiro e caminho do banco de sessão.
 
 Como isso não altera o comportamento entregue:
 
