@@ -662,6 +662,248 @@
           "created_at": "2026-09-02T16:41:13+00:00"
         }
       }
+    },
+    "presenter.confirm_cep": {
+      "label": "Confirmação de CEP",
+      "grupo": "presenter",
+      "placeholders": [
+        "cep",
+        "cidade",
+        "uf"
+      ],
+      "active": "default",
+      "versions": {
+        "default": {
+          "text": "Achei aqui: {cep} — {cidade}/{uf}. É aí que o carro fica?",
+          "note": "comportamento entregue",
+          "created_at": "2026-09-02T17:32:36+00:00"
+        }
+      }
+    },
+    "presenter.ask_plan.cabecalho": {
+      "label": "Escolha de plano: cabeçalho",
+      "grupo": "presenter",
+      "placeholders": [],
+      "active": "default",
+      "versions": {
+        "default": {
+          "text": "Tenho três planos. Olha o que cada um cobre:",
+          "note": "comportamento entregue",
+          "created_at": "2026-09-02T17:32:36+00:00"
+        }
+      }
+    },
+    "presenter.ask_plan.linha_plano": {
+      "label": "Escolha de plano: linha de cada plano",
+      "grupo": "presenter",
+      "placeholders": [
+        "nome",
+        "franquia",
+        "coberturas"
+      ],
+      "active": "default",
+      "versions": {
+        "default": {
+          "text": "*{nome}* — franquia de {franquia}. Cobre {coberturas}.",
+          "note": "comportamento entregue",
+          "created_at": "2026-09-02T17:32:36+00:00"
+        }
+      }
+    },
+    "presenter.ask_plan.rodape": {
+      "label": "Escolha de plano: pergunta final",
+      "grupo": "presenter",
+      "placeholders": [],
+      "active": "default",
+      "versions": {
+        "default": {
+          "text": "Qual deles quer que eu cote pra você?",
+          "note": "comportamento entregue",
+          "created_at": "2026-09-02T17:32:36+00:00"
+        }
+      }
+    },
+    "presenter.present.titulo": {
+      "label": "Cotação: título",
+      "grupo": "presenter",
+      "placeholders": [
+        "plano_nome"
+      ],
+      "active": "default",
+      "versions": {
+        "default": {
+          "text": "Cotei aqui o plano *{plano_nome}*:",
+          "note": "comportamento entregue",
+          "created_at": "2026-09-02T17:32:36+00:00"
+        }
+      }
+    },
+    "presenter.present.preco": {
+      "label": "Cotação: preço mensal",
+      "grupo": "presenter",
+      "placeholders": [
+        "premio"
+      ],
+      "active": "default",
+      "versions": {
+        "default": {
+          "text": "• *{premio}/mês*",
+          "note": "comportamento entregue",
+          "created_at": "2026-09-02T17:32:36+00:00"
+        }
+      }
+    },
+    "presenter.present.franquia": {
+      "label": "Cotação: franquia",
+      "grupo": "presenter",
+      "placeholders": [
+        "franquia"
+      ],
+      "active": "default",
+      "versions": {
+        "default": {
+          "text": "• Franquia de {franquia}",
+          "note": "comportamento entregue",
+          "created_at": "2026-09-02T17:32:36+00:00"
+        }
+      }
+    },
+    "presenter.present.coberturas": {
+      "label": "Cotação: coberturas",
+      "grupo": "presenter",
+      "placeholders": [
+        "coberturas"
+      ],
+      "active": "default",
+      "versions": {
+        "default": {
+          "text": "• Cobre {coberturas}",
+          "note": "comportamento entregue",
+          "created_at": "2026-09-02T17:32:36+00:00"
+        }
+      }
+    },
+    "presenter.present.carencia": {
+      "label": "Cotação: aviso de carência",
+      "grupo": "presenter",
+      "placeholders": [
+        "coberturas_carencia",
+        "dias"
+      ],
+      "active": "default",
+      "versions": {
+        "default": {
+          "text": "Importante: {coberturas_carencia} só passam a valer {dias} dias depois do início da vigência (carência).",
+          "note": "comportamento entregue",
+          "created_at": "2026-09-02T17:32:36+00:00"
+        }
+      }
+    },
+    "presenter.present.pro_rata": {
+      "label": "Cotação: primeiro pagamento pro-rata",
+      "grupo": "presenter",
+      "placeholders": [
+        "valor",
+        "dias",
+        "premio"
+      ],
+      "active": "default",
+      "versions": {
+        "default": {
+          "text": "O primeiro pagamento fica em {valor}, referente a {dias} dias, e depois {premio}/mês.",
+          "note": "comportamento entregue",
+          "created_at": "2026-09-02T17:32:36+00:00"
+        }
+      }
+    },
+    "presenter.present.aviso_cep_ausente": {
+      "label": "Cotação: aviso de estimativa sem CEP",
+      "grupo": "presenter",
+      "placeholders": [],
+      "active": "default",
+      "versions": {
+        "default": {
+          "text": "Como não tenho seu CEP, esse valor é uma estimativa e pode subir quando a gente confirmar a região.",
+          "note": "comportamento entregue",
+          "created_at": "2026-09-02T17:32:36+00:00"
+        }
+      }
+    },
+    "presenter.present.cta": {
+      "label": "Cotação: chamada para ação",
+      "grupo": "presenter",
+      "placeholders": [],
+      "active": "default",
+      "versions": {
+        "default": {
+          "text": "Quer fechar? Um consultor finaliza com você. Ou prefere ver outro plano?",
+          "note": "comportamento entregue",
+          "created_at": "2026-09-02T17:32:36+00:00"
+        }
+      }
+    },
+    "presenter.refuse": {
+      "label": "Recusa: explicação",
+      "grupo": "presenter",
+      "placeholders": [
+        "motivo"
+      ],
+      "active": "default",
+      "versions": {
+        "default": {
+          "text": "Vou ser sincero com você: não temos um plano que se encaixe no seu perfil. O motivo é que {motivo}",
+          "note": "comportamento entregue",
+          "created_at": "2026-09-02T17:32:36+00:00"
+        }
+      }
+    },
+    "presenter.refuse.fechamento": {
+      "label": "Recusa: fechamento",
+      "grupo": "presenter",
+      "placeholders": [],
+      "active": "default",
+      "versions": {
+        "default": {
+          "text": "Agradeço muito o contato e espero te atender numa outra oportunidade!",
+          "note": "comportamento entregue",
+          "created_at": "2026-09-02T17:32:36+00:00"
+        }
+      }
+    },
+    "extractor.instructions": {
+      "label": "Prompt do Extractor (system)",
+      "grupo": "extractor",
+      "placeholders": [
+        "today",
+        "ano",
+        "resumo",
+        "ultima",
+        "intents"
+      ],
+      "active": "default",
+      "versions": {
+        "default": {
+          "text": "Você extrai dados estruturados de UMA mensagem de um lead de seguro auto no WhatsApp (pt-BR).\nVocê não conversa e não decide nada: só preenche o schema.\n\nHoje é {today} (ano corrente: {ano}).\nJá coletado até aqui: {resumo}.\nÚltima pergunta que o consultor fez: {ultima}. Use isso para desambiguar respostas curtas\n(\"sim\" responde a essa pergunta; \"35\" é idade se a pergunta foi idade; \"2019\" é ano do carro se a pergunta foi o veículo).\n\nRegras:\n- Extraia SÓ o que a mensagem ATUAL diz. O que já estava coletado não se repete: campo não citado agora = null.\n- idade: número inteiro de anos do condutor. Não confunda com ano do carro.\n- veiculo_texto: como o lead falou (\"Onix 2019\", \"gol quadrado\"). veiculo_ano: o ano citado.\n- ano_parece_modelo = true quando veiculo_ano for maior que {ano} (provável ano-modelo, não de fabricação).\n- cep: copie como o lead escreveu, sem limpar.\n- plano_id: só se ele nomear um plano (essencial, completo, premium).\n- data_inicio: resolva datas relativas para uma data real usando hoje = {today}\n  (\"mês que vem\" = dia 1 do mês seguinte; \"dia 15\" = dia 15 do mês corrente, ou do próximo se já passou).\n- data_vaga = true (e data_inicio null) para \"quanto antes\", \"o mais rápido possível\", \"só estou olhando\".\n- observacao: no máximo uma frase curta com algo que o vendedor precise saber. Nunca invente.\n- NUNCA invente preço, valor, desconto ou cobertura. Você não tem essa informação.\n\nintent (escolha exatamente um):\n{intents}",
+          "note": "comportamento entregue",
+          "created_at": "2026-09-02T17:32:36+00:00"
+        }
+      }
+    },
+    "responder.instructions": {
+      "label": "Prompt do Responder (system)",
+      "grupo": "responder",
+      "placeholders": [
+        "resumo",
+        "diretiva"
+      ],
+      "active": "default",
+      "versions": {
+        "default": {
+          "text": "Você é consultor de vendas da AutoSeguro falando por WhatsApp, em pt-BR.\nTom: humano, direto, cordial, frases curtas. UMA pergunta por mensagem. No máximo um emoji, e só quando couber.\nNada de markdown, listas ou textão. Você já está no meio da conversa: não se reapresente a cada mensagem.\n\nEstado da conversa: {resumo}.\n\nSUA TAREFA NESTE TURNO: {diretiva}\nResponda à última mensagem do lead e cumpra essa tarefa. Não faça mais nada além disso.\n\nRegras invioláveis:\n- NUNCA cite preço, valor, mensalidade, franquia em reais, percentual, desconto ou multiplicador.\n  Quem passa valor é o sistema de cotação, em outra mensagem. Se o lead perguntar o preço antes da cotação,\n  diga que precisa dos dados para cotar e siga com a tarefa do turno.\n- NUNCA prometa desconto, condição especial, brinde ou prazo de pagamento.\n- NUNCA peça CPF, e-mail, telefone, placa, RG, endereço completo ou dados bancários.\n- Não invente cobertura, carência nem regra de aceitação. Não repita dados que o lead não deu.\n- Se não souber, diga que vai confirmar com o time.",
+          "note": "comportamento entregue",
+          "created_at": "2026-09-02T17:32:36+00:00"
+        }
+      }
     }
   }
 }

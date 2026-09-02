@@ -8,3 +8,4 @@ logs/*.jsonl
 !logs/entrega/
 data/
 .orq/
+logs/studio/
