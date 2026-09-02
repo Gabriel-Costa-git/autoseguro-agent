@@ -70,3 +70,26 @@ def test_markdown_js_e_servido_em_static(client: TestClient):
     assert "javascript" in resp.headers["content-type"] or "ecmascript" in resp.headers["content-type"]
     assert "renderMarkdown" in resp.text
     assert "./markdown.js" in client.get("/static/app.js").text
+
+
+def test_index_tem_a_aba_atendimentos(client: TestClient):
+    """A aba Atendimentos precisa dos ganchos que o módulo do app.js procura: lista, filtros,
+    detalhe (transcrição + composer) e o painel lateral de eventos/estado."""
+    resp = client.get("/")
+    assert resp.status_code == 200
+    for elemento in (
+        "at-itens",
+        "at-vazio",
+        "at-indisponivel",
+        "at-status",
+        "at-origem",
+        "at-busca",
+        "at-conversa",
+        "at-cid",
+        "at-takeover",
+        "at-mensagens",
+        "at-composer",
+        "at-eventos",
+        "at-estado",
+    ):
+        assert f'id="{elemento}"' in resp.text

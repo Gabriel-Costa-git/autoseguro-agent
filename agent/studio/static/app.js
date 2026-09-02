@@ -185,9 +185,13 @@ const Breadcrumb = {
   },
 };
 
+let abaAnterior = null;
+
 function renderTab() {
   if (normalizarHash()) return;
   const { tab, sub } = abaAtual();
+  if (abaAnterior && abaAnterior !== tab) onTabHidden(abaAnterior);
+  abaAnterior = tab;
   for (const t of TABS) el(`tab-${t}`).hidden = t !== tab;
   document.querySelectorAll("#tabs a").forEach((a) => a.classList.toggle("active", a.dataset.tab === tab));
   for (const s of SUBS_LAB) el(`lab-sub-${s}`).hidden = !(tab === "lab" && s === sub);
@@ -200,9 +204,14 @@ function renderTab() {
 }
 
 function onTabShown(tab, sub) {
+  if (tab === "atendimentos") Atendimentos.entrar(sub);
   if (tab === "lab" && sub === "prompts") Prompts.load().catch((e) => toast(e.message, "error"));
   if (tab === "lab" && sub === "tools") Tools.load().catch((e) => toast(e.message, "error"));
   if (tab === "config") Config.load().catch((e) => toast(e.message, "error"));
+}
+
+function onTabHidden(tab) {
+  if (tab === "atendimentos") Atendimentos.sair(); // nenhum polling roda fora da aba
 }
 
 window.addEventListener("hashchange", renderTab);
@@ -1355,6 +1364,395 @@ function criarChat(container, opts) {
   return chat;
 }
 
+// -------------------------------------------------------------------------- aba Atendimentos
+// Todas as conversas do agente (WhatsApp, Lab e CLI) lidas dos JSONL pelo backend. A lista
+// atualiza a cada 5s; a conversa aberta busca só os eventos novos (`since`) a cada 3s. Nenhum
+// timer roda fora da aba.
+const AT_CAMPOS = [
+  ["idade", "idade"],
+  ["veiculo_texto", "veículo"],
+  ["veiculo_ano", "ano"],
+  ["cep", "CEP"],
+  ["plano_id", "plano"],
+  ["data_inicio", "início"],
+];
+const AT_INTERVALO_LISTA = 5000;
+const AT_INTERVALO_DETALHE = 3000;
+
+/** "agora", "há 3 min", "há 2 h", "há 4 d" — o suficiente para varrer a lista. */
+function tempoRelativo(iso) {
+  if (!iso) return "";
+  const ts = new Date(iso).getTime();
+  if (Number.isNaN(ts)) return "";
+  const seg = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (seg < 60) return "agora";
+  if (seg < 3600) return `há ${Math.floor(seg / 60)} min`;
+  if (seg < 86400) return `há ${Math.floor(seg / 3600)} h`;
+  return `há ${Math.floor(seg / 86400)} d`;
+}
+
+const Atendimentos = {
+  itens: [],
+  assinaturaLista: "",
+  cid: null,
+  resumo: null,
+  eventos: [],
+  total: 0,
+  filtros: { status: "", origem: "", q: "" },
+  disponivel: true,
+  ativo: false,
+  timerLista: null,
+  timerDetalhe: null,
+
+  init() {
+    document.querySelectorAll("#at-status button").forEach((b) => {
+      b.addEventListener("click", () => {
+        this.filtros.status = b.dataset.status;
+        document.querySelectorAll("#at-status button").forEach((o) => o.classList.toggle("active", o === b));
+        this.recarregarLista();
+      });
+    });
+    el("at-origem").addEventListener("change", () => {
+      this.filtros.origem = el("at-origem").value;
+      this.recarregarLista();
+    });
+    el("at-busca").addEventListener("input", () => {
+      this.filtros.q = el("at-busca").value.trim();
+      this.recarregarLista();
+    });
+    document.querySelectorAll("#at-side-tabs button").forEach((b) => {
+      b.addEventListener("click", () => this.mostrarPainel(b.dataset.pane));
+    });
+    const takeover = el("at-takeover");
+    takeover.addEventListener("click", withLoading(takeover, () => this.alternarTakeover()));
+    el("at-send").addEventListener("click", () => this.enviar());
+    el("at-input").addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") this.enviar();
+    });
+    el("at-clear").addEventListener("click", () => {
+      el("at-input").value = "";
+      el("at-input").focus();
+    });
+  },
+
+  // ---- ciclo de vida (ligado ao router)
+  entrar(cid) {
+    this.ativo = true;
+    if (!this.timerLista) this.timerLista = setInterval(() => this.carregarLista(), AT_INTERVALO_LISTA);
+    this.carregarLista();
+    this.abrir(cid || null);
+  },
+
+  sair() {
+    this.ativo = false;
+    clearInterval(this.timerLista);
+    this.timerLista = null;
+    this.pararDetalhe();
+  },
+
+  pararDetalhe() {
+    clearInterval(this.timerDetalhe);
+    this.timerDetalhe = null;
+  },
+
+  indisponivel(mensagem) {
+    this.disponivel = false;
+    const aviso = el("at-indisponivel");
+    aviso.hidden = false;
+    aviso.textContent = `Atendimentos indisponível: ${mensagem}`;
+    el("at-itens").hidden = true;
+    el("at-vazio").hidden = true;
+    this.sair();
+  },
+
+  // ---- lista
+  recarregarLista() {
+    this.assinaturaLista = ""; // força o redesenho mesmo com os mesmos itens
+    this.carregarLista();
+  },
+
+  async carregarLista() {
+    if (!this.disponivel) return;
+    const busca = new URLSearchParams();
+    for (const [chave, valor] of Object.entries(this.filtros)) if (valor) busca.set(chave, valor);
+    let data;
+    try {
+      data = await api(`/api/atendimentos?${busca.toString()}`);
+    } catch (err) {
+      if (err.status === 404) this.indisponivel("rota não existe neste backend");
+      else toast(err.message || String(err), "error");
+      return;
+    }
+    this.itens = data.itens || [];
+    const assinatura = JSON.stringify(this.itens) + this.cid;
+    if (assinatura === this.assinaturaLista) return; // nada mudou: não repinta (preserva o scroll)
+    this.assinaturaLista = assinatura;
+    this.renderLista();
+  },
+
+  renderLista() {
+    const box = el("at-itens");
+    const scroll = box.scrollTop;
+    box.innerHTML = "";
+    for (const item of this.itens) box.appendChild(this.linha(item));
+    box.scrollTop = scroll;
+    box.hidden = this.itens.length === 0;
+    const vazio = el("at-vazio");
+    vazio.hidden = this.itens.length > 0;
+    // "nada aqui" e "nada com esses filtros" são coisas diferentes para quem opera
+    const filtrando = Boolean(this.filtros.status || this.filtros.origem || this.filtros.q);
+    vazio.querySelector(".empty-1").textContent = filtrando ? "Nenhuma conversa com esses filtros." : "Nenhuma conversa ainda.";
+    vazio.querySelector(".empty-2").textContent = filtrando
+      ? "Ajuste o status, a origem ou a busca."
+      : "As conversas do WhatsApp, do Lab e do CLI aparecem aqui assim que o agente responde a primeira mensagem.";
+    this.preencherOrigens();
+  },
+
+  /** O select de origem sai dos próprios itens (o backend não expõe a lista). */
+  preencherOrigens() {
+    const select = el("at-origem");
+    const origens = Array.from(new Set(this.itens.map((i) => i.origem).filter(Boolean))).sort();
+    const atual = this.filtros.origem;
+    const conhecidas = Array.from(select.options).map((o) => o.value);
+    if (JSON.stringify(["", ...origens]) === JSON.stringify(conhecidas)) return;
+    select.innerHTML =
+      '<option value="">Todas as origens</option>' +
+      origens.map((o) => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join("");
+    select.value = origens.includes(atual) ? atual : "";
+  },
+
+  linha(item) {
+    const div = document.createElement("div");
+    div.className = "at-item" + (item.conversation_id === this.cid ? " selected" : "");
+
+    const topo = document.createElement("div");
+    topo.className = "at-item-topo";
+    const nome = document.createElement("span");
+    nome.className = "at-item-nome";
+    nome.textContent = item.nome || item.conversation_id;
+    const quando = document.createElement("span");
+    quando.className = "at-item-quando";
+    quando.textContent = tempoRelativo(item.ultimo_ts);
+    topo.append(nome, quando);
+
+    const meta = document.createElement("div");
+    meta.className = "at-item-meta";
+    meta.appendChild(badgeEl(item.origem || "?", "at-origem"));
+    meta.appendChild(badgeEl(item.status, `at-st-${item.status}`));
+    if (item.stage) {
+      const etapa = document.createElement("span");
+      etapa.className = "at-item-etapa";
+      etapa.textContent = item.stage;
+      meta.appendChild(etapa);
+    }
+
+    const msg = document.createElement("div");
+    msg.className = "at-item-msg";
+    msg.textContent = truncate((item.ultima_msg || "").replace(/\s+/g, " "), 80);
+
+    div.append(topo, meta, msg);
+    div.addEventListener("click", () => {
+      location.hash = `#atendimentos/${item.conversation_id}`;
+    });
+    return div;
+  },
+
+  // ---- detalhe
+  abrir(cid) {
+    if (cid === this.cid) return;
+    this.pararDetalhe();
+    this.cid = cid;
+    this.eventos = [];
+    this.total = 0;
+    this.resumo = null;
+    el("at-conversa").hidden = !cid;
+    el("at-sem-selecao").hidden = !!cid;
+    this.assinaturaLista = ""; // a seleção mudou: repinta a lista
+    this.renderLista();
+    if (!cid) return;
+    el("at-cid").textContent = cid;
+    el("at-mensagens").innerHTML = "";
+    el("at-eventos").innerHTML = "";
+    this.mostrarPainel("eventos");
+    this.carregarDetalhe();
+    this.timerDetalhe = setInterval(() => this.carregarDetalhe(), AT_INTERVALO_DETALHE);
+  },
+
+  async carregarDetalhe() {
+    if (!this.cid) return;
+    const cid = this.cid;
+    let data;
+    try {
+      data = await api(`/api/atendimentos/${encodeURIComponent(cid)}?since=${this.eventos.length}`);
+    } catch (err) {
+      this.pararDetalhe();
+      if (err.status === 404) toast(`conversa ${cid} não encontrada`, "error");
+      else toast(err.message || String(err), "error");
+      return;
+    }
+    if (cid !== this.cid) return; // o operador trocou de conversa enquanto a resposta vinha
+    if (data.total < this.eventos.length) this.eventos = []; // arquivo rotacionado: recomeça
+    const novos = data.eventos || [];
+    this.eventos = this.eventos.concat(novos);
+    this.total = data.total;
+    this.resumo = data.resumo;
+    this.renderCabecalho();
+    if (novos.length) {
+      this.renderMensagens();
+      for (const ev of novos) el("at-eventos").appendChild(this.linhaEvento(ev));
+      el("at-eventos").scrollTop = el("at-eventos").scrollHeight;
+    }
+    this.renderEstado();
+  },
+
+  renderCabecalho() {
+    const resumo = this.resumo || {};
+    const badges = el("at-badges");
+    badges.innerHTML = "";
+    badges.appendChild(badgeEl(resumo.origem || "?", "at-origem"));
+    badges.appendChild(badgeEl(resumo.status || "?", `at-st-${resumo.status}`));
+    if (resumo.stage) badges.appendChild(badgeEl(resumo.stage));
+    if (resumo.handoff_reason) badges.appendChild(badgeEl(`handoff: ${resumo.handoff_reason}`, "at-st-encerrado"));
+
+    const humano = resumo.status === "humano";
+    const takeover = el("at-takeover");
+    takeover.textContent = humano ? "Devolver ao agente" : "Assumir";
+    takeover.classList.toggle("green", humano);
+
+    // enviar só vale em conversa do WhatsApp assumida (contrato do backend)
+    const podeEnviar = humano && String(this.cid).startsWith("wa-");
+    el("at-composer").hidden = !podeEnviar;
+    const nota = el("at-nota");
+    if (humano && !podeEnviar) {
+      nota.hidden = false;
+      nota.textContent = "Conversa assumida. Só dá para responder por aqui em conversas do WhatsApp (wa-*).";
+    } else {
+      nota.hidden = true;
+    }
+  },
+
+  renderMensagens() {
+    const box = el("at-mensagens");
+    const noFim = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+    box.innerHTML = "";
+    for (const ev of this.eventos) {
+      if (ev.event !== "inbound" && ev.event !== "outbound") continue;
+      const dados = ev.data || {};
+      const lead = ev.event === "inbound";
+      const source = dados.source || "";
+      const bolha = document.createElement("div");
+      bolha.className = "bubble " + (lead ? "bubble-lead" : "bubble-agent") + (source === "humano" ? " bubble-humano" : "");
+      bolha.textContent = dados.text || (dados.media_type ? `(mídia: ${dados.media_type})` : "");
+      const etiqueta = lead ? dados.sender_name || "" : source;
+      if (etiqueta) {
+        const src = document.createElement("span");
+        src.className = "src";
+        src.textContent = etiqueta;
+        bolha.appendChild(src);
+      }
+      box.appendChild(bolha);
+    }
+    if (noFim) box.scrollTop = box.scrollHeight;
+  },
+
+  linhaEvento(ev) {
+    const row = document.createElement("div");
+    row.className = "event-row";
+    const hora = (ev.ts || "").slice(11, 19);
+    row.innerHTML = `<div class="event-line">
+        <time>${escapeHtml(hora)}</time>
+        <span class="badge badge-ev badge-ev-${escapeHtml(ev.event)}">${escapeHtml(ev.event)}</span>
+        <span>${escapeHtml(summarizeEvent(ev))}</span>
+      </div>`;
+    row.addEventListener("click", () => {
+      const existente = row.querySelector("pre");
+      if (existente) {
+        existente.remove();
+        return;
+      }
+      const pre = document.createElement("pre");
+      pre.textContent = JSON.stringify(ev, null, 2);
+      row.appendChild(pre);
+    });
+    return row;
+  },
+
+  /** Estado do lead reconstruído da transcrição: extrações acumuladas + última decisão. */
+  renderEstado() {
+    const campos = {};
+    let intent = null;
+    let stage = null;
+    let handoff = null;
+    for (const ev of this.eventos) {
+      const dados = ev.data || {};
+      if (ev.event === "extraction") {
+        for (const [chave] of AT_CAMPOS) if (dados[chave] !== null && dados[chave] !== undefined) campos[chave] = dados[chave];
+        if (dados.intent) intent = dados.intent;
+      } else if (ev.event === "decision" && dados.stage) stage = dados.stage;
+      else if (ev.event === "handoff") handoff = dados.reason || dados.motivo || "sim";
+    }
+    const resumo = this.resumo || {};
+    const linhas = [
+      ["origem", resumo.origem],
+      ["etapa", stage || resumo.stage],
+      ["turnos", resumo.turnos],
+      ["última intenção", intent],
+      ...AT_CAMPOS.map(([chave, rotulo]) => [rotulo, campos[chave]]),
+      ["handoff", handoff || resumo.handoff_reason],
+    ].filter(([, valor]) => valor !== null && valor !== undefined && valor !== "");
+
+    const box = el("at-estado");
+    box.innerHTML = "";
+    if (!linhas.length) {
+      box.innerHTML = '<p class="muted">Sem dados coletados nesta conversa.</p>';
+      return;
+    }
+    for (const [rotulo, valor] of linhas) {
+      const linha = document.createElement("div");
+      linha.className = "at-estado-linha";
+      const c = document.createElement("span");
+      c.className = "at-estado-chave";
+      c.textContent = rotulo;
+      const v = document.createElement("span");
+      v.className = "at-estado-valor";
+      v.textContent = String(valor);
+      linha.append(c, v);
+      box.appendChild(linha);
+    }
+  },
+
+  mostrarPainel(nome) {
+    for (const p of ["eventos", "estado"]) el(`at-pane-${p}`).hidden = p !== nome;
+    document.querySelectorAll("#at-side-tabs button").forEach((b) => b.classList.toggle("active", b.dataset.pane === nome));
+  },
+
+  // ---- ações
+  async alternarTakeover() {
+    if (!this.cid) return;
+    const humano = this.resumo && this.resumo.status === "humano";
+    const rota = humano ? "devolver" : "assumir";
+    this.resumo = await api(`/api/atendimentos/${encodeURIComponent(this.cid)}/${rota}`, { method: "POST" });
+    this.renderCabecalho();
+    toast(humano ? "conversa devolvida ao agente" : "conversa assumida", "success");
+    this.recarregarLista();
+  },
+
+  async enviar() {
+    const input = el("at-input");
+    const texto = input.value.trim();
+    if (!texto || !this.cid) return;
+    input.value = "";
+    try {
+      await api(`/api/atendimentos/${encodeURIComponent(this.cid)}/mensagens`, { method: "POST", body: { text: texto } });
+      await this.carregarDetalhe();
+      this.recarregarLista();
+    } catch (err) {
+      input.value = texto; // não perde o que o operador escreveu
+      toast(err.message || String(err), "error");
+    }
+  },
+};
+
 // -------------------------------------------------------------------------- aba Lab
 const PAINEIS = ["eventos", "contexto", "estado"];
 
@@ -1555,6 +1953,7 @@ function atalhos() {
 // -------------------------------------------------------------------------- boot
 document.addEventListener("DOMContentLoaded", () => {
   Health.start();
+  Atendimentos.init();
   Prompts.init();
   Lab.init();
   TestPanel.init();

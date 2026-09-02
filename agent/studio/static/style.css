@@ -332,7 +332,45 @@ button.loading::after {
 .diff-line.changed { background: var(--warn-bg); color: var(--warn); }
 
 /* ---------------------------------------------------------------- Atendimentos */
-.at-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.at-shell { display: grid; grid-template-columns: 360px 1fr; height: 100%; min-height: 0; }
+.at-list { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); }
+.at-filtros { flex: none; display: flex; flex-direction: column; gap: 8px; padding: 12px; border-bottom: 1px solid var(--border); }
+.at-filtros .segmented { display: flex; }
+.at-filtros .segmented button { flex: 1; padding: 0 6px; }
+.at-filtros-linha { display: flex; gap: 8px; }
+.at-filtros-linha select { width: 145px; flex: none; }
+.at-filtros-linha input { min-width: 0; }
+.at-list > .notice { margin: 12px; }
+.at-itens { flex: 1; min-height: 0; overflow: auto; }
+.at-item { display: flex; flex-direction: column; gap: 5px; padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.at-item:hover { background: var(--surface); }
+.at-item.selected { background: var(--surface-2); box-shadow: inset 2px 0 0 var(--accent); }
+.at-item-topo { display: flex; align-items: baseline; gap: 8px; }
+.at-item-nome { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.at-item-quando { flex: none; font-size: 11px; color: var(--text-muted); }
+.at-item-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.at-item-etapa { font-size: 11px; color: var(--text-muted); }
+.at-item-msg { font-size: 12px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.at-origem { font-family: var(--font-mono); font-size: 11px; font-weight: 500; }
+.at-st-agente { background: #10233f; border-color: #1e3a63; color: #93b8f5; }
+.at-st-humano { background: var(--success-bg); border-color: #1c5136; color: var(--success); }
+.at-st-encerrado { color: var(--text-muted); }
+
+.at-detalhe { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.at-conversa { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.at-head { flex: none; min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 16px; border-bottom: 1px solid var(--border); }
+.at-head-info { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.at-head-info .mono { font-size: 13px; }
+.at-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 380px; }
+.at-chat { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.at-side { display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--border); }
+.at-composer-box { flex: none; border-top: 1px solid var(--border); }
+.at-nota { flex: none; margin: 0; padding: 10px 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--text-muted); }
+.at-estado { display: flex; flex-direction: column; gap: 8px; }
+.at-estado-linha { display: flex; gap: 10px; font-size: 12.5px; }
+.at-estado-chave { flex: none; width: 110px; color: var(--text-muted); }
+.at-estado-valor { min-width: 0; color: var(--text); word-break: break-word; }
+.bubble-humano { border-color: #245f40; }
 
 /* ---------------------------------------------------------------- Lab (Conversa · Prompts · Tools) */
 .lab-shell { display: flex; flex-direction: column; height: 100%; min-height: 0; }

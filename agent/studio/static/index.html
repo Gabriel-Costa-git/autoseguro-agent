@@ -30,10 +30,79 @@
       <main class="content">
         <!-- ------------------------------------------------------------ ATENDIMENTOS -->
         <section id="tab-atendimentos" class="tab-panel at-shell" hidden>
-          <div class="empty-state" id="at-empty">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /><path d="M8 9h8" /><path d="M8 13h5" /></svg>
-            <div class="empty-1">As conversas do agente aparecem aqui.</div>
-            <div class="empty-2">WhatsApp, Lab e CLI numa lista só, com origem, etapa e a opção de assumir a conversa.</div>
+          <!-- lista -->
+          <div class="at-list">
+            <div class="at-filtros">
+              <div class="segmented" id="at-status">
+                <button type="button" data-status="" class="active">Todos</button>
+                <button type="button" data-status="agente">Agente</button>
+                <button type="button" data-status="humano">Humano</button>
+                <button type="button" data-status="encerrado">Encerrado</button>
+              </div>
+              <div class="at-filtros-linha">
+                <select id="at-origem" aria-label="Origem" autocomplete="off"><option value="">Todas as origens</option></select>
+                <input type="text" id="at-busca" placeholder="Buscar…" aria-label="Buscar conversa" autocomplete="off" />
+              </div>
+            </div>
+            <div class="notice warn" id="at-indisponivel" hidden>Atendimentos indisponível.</div>
+            <div class="at-itens" id="at-itens" hidden></div>
+            <div class="empty-state" id="at-vazio">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /><path d="M8 9h8" /><path d="M8 13h5" /></svg>
+              <div class="empty-1">Nenhuma conversa ainda.</div>
+              <div class="empty-2">As conversas do WhatsApp, do Lab e do CLI aparecem aqui assim que o agente responde a primeira mensagem.</div>
+            </div>
+          </div>
+
+          <!-- detalhe -->
+          <div class="at-detalhe">
+            <div class="empty-state" id="at-sem-selecao">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+              <div class="empty-1">Selecione uma conversa.</div>
+              <div class="empty-2">A transcrição, os eventos do turno e o estado do lead aparecem aqui.</div>
+            </div>
+
+            <div class="at-conversa" id="at-conversa" hidden>
+              <div class="at-head">
+                <div class="at-head-info">
+                  <span class="mono" id="at-cid"></span>
+                  <span class="badges" id="at-badges"></span>
+                </div>
+                <button type="button" id="at-takeover" class="primary">Assumir</button>
+              </div>
+
+              <div class="at-body">
+                <div class="at-chat">
+                  <div class="chat-scroll" id="at-mensagens"></div>
+                  <p class="at-nota" id="at-nota" hidden></p>
+                  <div class="at-composer-box" id="at-composer" hidden>
+                    <div class="composer">
+                      <button type="button" class="composer-x" id="at-clear" title="Limpar" aria-label="Limpar">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+                      </button>
+                      <input type="text" id="at-input" placeholder="Responder como humano…" aria-label="Mensagem ao lead" />
+                      <button type="button" class="composer-send" id="at-send" title="Enviar" aria-label="Enviar">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13" /><path d="M22 2l-7 20-4-9-9-4Z" /></svg>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <aside class="at-side">
+                  <div class="lab-side-head">
+                    <div class="segmented" id="at-side-tabs">
+                      <button type="button" data-pane="eventos" class="active">Eventos</button>
+                      <button type="button" data-pane="estado">Estado</button>
+                    </div>
+                  </div>
+                  <div class="lab-pane" id="at-pane-eventos">
+                    <div id="at-eventos" class="events-list"></div>
+                  </div>
+                  <div class="lab-pane" id="at-pane-estado" hidden>
+                    <div id="at-estado" class="at-estado"></div>
+                  </div>
+                </aside>
+              </div>
+            </div>
           </div>
         </section>
 
