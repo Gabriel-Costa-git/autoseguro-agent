@@ -1,10 +1,13 @@
 """Configuração editável em tempo de execução (Studio), com hot-reload.
 
-Três arquivos JSON em `config/`:
+Quatro arquivos JSON em `config/`:
 - `prompts.json`  — textos/prompts por SLOT, com versões nomeadas e uma ativa. A versão
   `default` é imutável e igual ao texto em `agent/defaults.py` (o comportamento entregue).
 - `tools.json` e `settings.json` — SÓ overrides. Valor efetivo = override > `.env`/Settings
   > default do código. Assim o `.env` continua valendo e "voltar ao padrão" é apagar o override.
+- `custom_tools.json` — REGISTRO das tools que o operador cria no painel (`http` ou `sql`), que
+  viram function calling do Responder. Registro vazio = agente idêntico ao entregue. Segredo nunca
+  entra aqui: o que se grava é a referência `${env:NOME}`, resolvida só no runtime da tool.
 
 Regras:
 - Nada é lido no import: todo consumidor chama `store.text(...)`/`store.param(...)` na hora.
@@ -16,6 +19,7 @@ Regras:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -23,9 +27,9 @@ import string
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from agent.config import ROOT, settings
 from agent.defaults import SLOTS
@@ -37,6 +41,19 @@ CONFIG_DIR = ROOT / "config"
 
 DEFAULT_VERSION = "default"
 _PLACEHOLDER_RE = re.compile(r"{([a-zA-Z_][a-zA-Z0-9_]*)}")
+
+# --- tools do painel
+NOME_TOOL_RE = re.compile(r"^[a-z][a-z0-9_]{2,40}$")        # vira o `name` da função no LLM
+NOME_PARAM_RE = re.compile(r"^[a-z][a-z0-9_]{0,30}$")       # vira property do schema e `:param` no SQL
+ENV_REF_RE = re.compile(r"\$\{env:([^}]*)\}")               # `${env:APOLICE_KEY}` — resolvido só em runtime
+NOME_ENV_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+SQL_PARAM_RE = re.compile(r"(?<![:\w]):([a-z][a-z0-9_]*)")   # parâmetro nomeado do sqlite/psycopg
+
+# Só leitura: a query precisa começar com SELECT/WITH e não pode carregar nenhuma destas palavras.
+SQL_PROIBIDO = (
+    "insert", "update", "delete", "drop", "alter", "create", "replace", "truncate",
+    "attach", "detach", "pragma", "vacuum", "grant", "revoke", "commit", "rollback", "into",
+)
 
 
 # --------------------------------------------------------------------------- esquemas
@@ -88,6 +105,146 @@ class ToolsFile(BaseModel):
     viacep: ViacepTools = Field(default_factory=ViacepTools)
     policy: PolicyTools = Field(default_factory=PolicyTools)
     rules: RulesTools = Field(default_factory=RulesTools)
+
+
+# --------------------------------------------------------------------------- tools do painel
+TipoParametro = Literal["string", "number", "integer", "boolean"]
+
+
+class ParametroTool(BaseModel):
+    """Um argumento da função, como o LLM vai vê-lo no JSON Schema."""
+
+    tipo: TipoParametro = "string"
+    descricao: str = ""
+    obrigatorio: bool = False
+
+
+class HttpTool(BaseModel):
+    """Request HTTP. `{param}` é substituído em url/query/body; `${env:X}` em qualquer campo."""
+
+    metodo: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = "GET"
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    query: dict[str, str] = Field(default_factory=dict)
+    body: Any | None = None
+    resposta: Literal["json", "texto"] = "json"
+
+
+class SqlTool(BaseModel):
+    """Query SOMENTE LEITURA. `conexao` é caminho de sqlite ou `postgresql://…` (via `${env:X}`)."""
+
+    conexao: str
+    query: str
+    max_linhas: int = Field(20, ge=1, le=500)
+
+
+class CustomTool(BaseModel):
+    """Uma tool criada no painel. Vira uma `agno.tools.Function` no Responder."""
+
+    nome: str
+    tipo: Literal["http", "sql"]
+    enabled: bool = True
+    descricao: str                       # o LLM lê isto para decidir QUANDO chamar
+    instrucoes: str | None = None        # vai para o system prompt (Function.instructions)
+    parametros: dict[str, ParametroTool] = Field(default_factory=dict)
+    timeout_s: float = Field(5.0, gt=0, le=60)
+    max_chars: int = Field(2000, ge=100, le=20000)
+    http: HttpTool | None = None
+    sql: SqlTool | None = None
+    criado_em: str = ""
+    atualizado_em: str = ""
+
+    @field_validator("nome")
+    @classmethod
+    def _nome_valido(cls, v: str) -> str:
+        if not NOME_TOOL_RE.fullmatch(v):
+            raise ValueError("nome inválido: use 3–41 caracteres [a-z0-9_] começando por letra")
+        return v
+
+    @field_validator("descricao")
+    @classmethod
+    def _descricao_obrigatoria(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("descrição é obrigatória: é por ela que o modelo decide quando chamar a tool")
+        return v
+
+    @field_validator("parametros")
+    @classmethod
+    def _parametros_validos(cls, v: dict[str, ParametroTool]) -> dict[str, ParametroTool]:
+        for nome in v:
+            if not NOME_PARAM_RE.fullmatch(nome):
+                raise ValueError(f"parâmetro inválido: {nome!r} (use [a-z0-9_] começando por letra)")
+        return v
+
+    @model_validator(mode="after")
+    def _coerente(self) -> CustomTool:
+        if self.tipo == "http":
+            if self.http is None:
+                raise ValueError("tool do tipo http precisa do bloco `http`")
+            self.sql = None
+            _validar_http(self.http, set(self.parametros))
+        else:
+            if self.sql is None:
+                raise ValueError("tool do tipo sql precisa do bloco `sql`")
+            self.http = None
+            _validar_sql(self.sql, set(self.parametros))
+        for texto in (self.descricao, self.instrucoes or ""):
+            validar_env_refs(texto)
+        return self
+
+
+class CustomToolsFile(BaseModel):
+    tools: dict[str, CustomTool] = Field(default_factory=dict)
+
+
+def validar_env_refs(texto: str) -> None:
+    """Toda referência `${env:X}` tem de ter nome de variável de ambiente plausível."""
+    for nome in ENV_REF_RE.findall(texto or ""):
+        if not NOME_ENV_RE.fullmatch(nome):
+            raise ValueError(f"referência de ambiente inválida: ${{env:{nome}}} (use MAIUSCULAS_COM_UNDERSCORE)")
+
+
+def _validar_templates(texto: str, parametros: set[str], onde: str) -> None:
+    """`{param}` só pode citar parâmetro declarado — senão a tool quebraria só na hora da chamada."""
+    validar_env_refs(texto)
+    desconhecidos = placeholders_de(ENV_REF_RE.sub("", texto or "")) - parametros
+    if desconhecidos:
+        raise ValueError(f"{onde}: parâmetros desconhecidos {sorted(desconhecidos)}; declarados: {sorted(parametros)}")
+
+
+def _validar_http(http: HttpTool, parametros: set[str]) -> None:
+    if not http.url.startswith(("http://", "https://")):
+        raise ValueError("url precisa começar com http:// ou https://")
+    _validar_templates(http.url, parametros, "url")
+    for chave, valor in http.headers.items():
+        _validar_templates(str(valor), parametros, f"header {chave}")
+    for chave, valor in http.query.items():
+        _validar_templates(str(valor), parametros, f"query {chave}")
+    if isinstance(http.body, str):
+        _validar_templates(http.body, parametros, "body")
+    elif isinstance(http.body, dict):
+        for chave, valor in http.body.items():
+            if isinstance(valor, str):
+                _validar_templates(valor, parametros, f"body {chave}")
+
+
+def _validar_sql(sql: SqlTool, parametros: set[str]) -> None:
+    """Somente leitura: 1 statement, começa com SELECT/WITH, sem `;` e sem palavra de escrita."""
+    validar_env_refs(sql.conexao)
+    query = (sql.query or "").strip()
+    if not query:
+        raise ValueError("query vazia")
+    if ";" in query:
+        raise ValueError("query com `;`: só um statement por tool")
+    if not re.match(r"^(select|with)\b", query, re.IGNORECASE):
+        raise ValueError("query precisa começar com SELECT ou WITH (somente leitura)")
+    baixo = query.lower()
+    proibidas = [p for p in SQL_PROIBIDO if re.search(rf"\b{p}\b", baixo)]
+    if proibidas:
+        raise ValueError(f"query não é somente leitura: {sorted(proibidas)}")
+    desconhecidos = set(SQL_PARAM_RE.findall(query)) - parametros
+    if desconhecidos:
+        raise ValueError(f"query cita parâmetros não declarados: {sorted(desconhecidos)}")
 
 
 class SettingsFile(BaseModel):
@@ -212,8 +369,13 @@ class ConfigStore:
         self._listeners.append(fn)
 
     def ensure_files(self) -> None:
-        """Cria os três arquivos se faltarem (prompts com só a versão `default` em cada slot)."""
-        for nome, modelo in (("prompts", PromptsFile), ("tools", ToolsFile), ("settings", SettingsFile)):
+        """Cria os quatro arquivos se faltarem (prompts com só a versão `default` em cada slot)."""
+        for nome, modelo in (
+            ("prompts", PromptsFile),
+            ("tools", ToolsFile),
+            ("settings", SettingsFile),
+            ("custom_tools", CustomToolsFile),
+        ):
             if not self._path(nome).exists():
                 self._save(nome, self._load(nome, modelo))
 
@@ -316,6 +478,62 @@ class ConfigStore:
         self._save("prompts", arquivo)
         return slot
 
+    # ---- tools do painel (registro, não override)
+    def custom_tools(self) -> CustomToolsFile:
+        """Registro das tools criadas no painel, com hot-reload por mtime como os outros arquivos."""
+        return self._load("custom_tools", CustomToolsFile)  # type: ignore[return-value]
+
+    def custom_tool(self, nome: str) -> CustomTool:
+        tool = self.custom_tools().tools.get(nome)
+        if tool is None:
+            raise ConfigError(f"tool desconhecida: {nome}")
+        return tool
+
+    def custom_tools_version(self) -> str:
+        """Impressão digital das tools HABILITADAS — o `Responder` reconstrói o Agent quando muda.
+
+        Hash do conteúdo (e não mtime) para salvar/reabrir sem mexer em nada não jogar fora o
+        Agent e o histórico em cache. Registro ilegível vale vazio: o turno não pode quebrar por
+        causa de um JSON torto (o painel mostra o erro na hora de listar).
+        """
+        try:
+            habilitadas = {n: t for n, t in self.custom_tools().tools.items() if t.enabled}
+        except ConfigError:
+            return ""
+        if not habilitadas:
+            return ""
+        bruto = json.dumps(
+            {n: habilitadas[n].model_dump(mode="json") for n in sorted(habilitadas)},
+            ensure_ascii=False, sort_keys=True,
+        )
+        return hashlib.sha256(bruto.encode("utf-8")).hexdigest()[:16]
+
+    def upsert_custom_tool(self, nome: str, dados: dict[str, Any]) -> CustomTool:
+        """Cria ou substitui uma tool. `criado_em` é preservado; `atualizado_em` é sempre agora."""
+        if not NOME_TOOL_RE.fullmatch(nome):
+            raise ConfigError("nome inválido: use 3–41 caracteres [a-z0-9_] começando por letra")
+        corpo = dict(dados)
+        corpo["nome"] = nome
+        arquivo = self.custom_tools()
+        atual = arquivo.tools.get(nome)
+        agora = datetime.now(UTC).isoformat(timespec="seconds")
+        corpo["criado_em"] = (atual.criado_em if atual else None) or corpo.get("criado_em") or agora
+        corpo["atualizado_em"] = agora
+        try:
+            tool = CustomTool.model_validate(corpo)
+        except ValidationError as exc:
+            raise ConfigError(f"tool inválida: {_primeiro_erro(exc)}") from exc
+        arquivo.tools[nome] = tool
+        self._save("custom_tools", arquivo)
+        return tool
+
+    def delete_custom_tool(self, nome: str) -> None:
+        arquivo = self.custom_tools()
+        if nome not in arquivo.tools:
+            raise ConfigError(f"tool desconhecida: {nome}")
+        del arquivo.tools[nome]
+        self._save("custom_tools", arquivo)
+
     # ---- tools / settings (overrides)
     def _overrides(self, nome: str) -> dict[str, Any]:
         modelo = ToolsFile if nome == "tools" else SettingsFile
@@ -373,6 +591,14 @@ class ConfigStore:
             cursor = cursor[p]
         cursor[partes[-1]] = None
         self.set_overrides(raiz, patch)
+
+
+def _primeiro_erro(exc: ValidationError) -> str:
+    """Mensagem curta do 1º erro do pydantic, no formato que a UI mostra ao operador."""
+    erro = exc.errors()[0]
+    caminho = ".".join(str(p) for p in erro["loc"])
+    msg = str(erro["msg"]).removeprefix("Value error, ")
+    return f"{msg} em {caminho}" if caminho else msg
 
 
 _MISSING = object()

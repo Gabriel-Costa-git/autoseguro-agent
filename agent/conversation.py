@@ -240,6 +240,7 @@ class Conversation:
                 directive = action.directive
             inicio = time.perf_counter()
             texto = await self.responder.reply(directive, state, turno.inbound.text or "")
+            self._logar_tool_calls(turno)
             turno.logger.event(
                 "llm_call",
                 message_id=turno.inbound.message_id,
@@ -254,6 +255,16 @@ class Conversation:
             return await self._cotar(state, action, turno, rodada)
 
         raise ValueError(f"ação desconhecida: {action.kind}")
+
+    def _logar_tool_calls(self, turno: _Turno) -> None:
+        """Grava as tools que o Responder chamou durante a resposta (antes do `llm_call`: elas
+        aconteceram DENTRO dela). Responder sem tools — ou dublê de teste — não expõe o método.
+        """
+        drenar = getattr(self.responder, "drenar_tool_calls", None)
+        if drenar is None:
+            return
+        for evento in drenar(turno.inbound.conversation_id):
+            turno.logger.event("tool_call", message_id=turno.inbound.message_id, **evento)
 
     async def _cotar(self, state: LeadState, action: Any, turno: _Turno, rodada: int) -> LeadState:
         async def on_slow() -> None:

@@ -1,6 +1,7 @@
 """API HTTP do Studio: prompts (versões/ativação), overrides de tools/settings, o valor
-efetivo de cada parâmetro, o catálogo de modelos do Gemini e as rotas de Atendimentos
-(`agent/studio/atendimentos_api.py`). A sessão de teste (Lab) mora em `agent/studio/lab.py`
+efetivo de cada parâmetro, o catálogo de modelos do Gemini, as rotas de Atendimentos
+(`agent/studio/atendimentos_api.py`) e o registro de tools do painel
+(`agent/studio/custom_tools_api.py`). A sessão de teste (Lab) mora em `agent/studio/lab.py`
 e é montada aqui se o módulo existir (import tolerante).
 
 `app.state` é o ponto de injeção de tudo o que os routers usam: `store`,
@@ -29,6 +30,7 @@ from agent.runtime_config import ConfigError, ConfigStore, PromptSlot
 from agent.runtime_config import store as _singleton_store
 from agent.studio import models_catalog
 from agent.studio.atendimentos_api import construir_router as construir_atendimentos
+from agent.studio.custom_tools_api import construir_router as construir_custom_tools
 from agent.takeover import TakeoverStore
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -101,6 +103,7 @@ def build_studio_app(
     app.state.catalogo = Catalogo(settings.log_dir, takeover=app.state.takeover)
     app.state.evolution_sender = None
     app.state.models_client_factory = None
+    app.state.tools_client = None       # httpx.AsyncClient das tools do painel (teste injeta um falso)
 
     # ------------------------------------------------------------ prompts
     @app.get("/api/prompts")
@@ -209,8 +212,9 @@ def build_studio_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return _catalogo_modelos(dados)
 
-    # ------------------------------------------------------------ atendimentos
+    # ------------------------------------------------------------ atendimentos + tools do painel
     app.include_router(construir_atendimentos())
+    app.include_router(construir_custom_tools())
 
     # ------------------------------------------------------------ saúde + lab (se já existir)
     @app.get("/api/health")

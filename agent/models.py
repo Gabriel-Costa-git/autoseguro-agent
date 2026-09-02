@@ -304,7 +304,7 @@ class Outbound(BaseModel):
 EventKind = Literal[
     "inbound", "outbound", "extraction", "decision",
     "quote_attempt", "quote_result", "cep_lookup",
-    "llm_call", "handoff", "refusal", "error",
+    "llm_call", "tool_call", "handoff", "refusal", "error",
 ]
 
 

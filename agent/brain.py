@@ -9,6 +9,10 @@ Textos e parâmetros vêm do `runtime_config.store` NA CHAMADA (nunca no import)
 editar um prompt ou trocar o modelo no Studio vale no turno seguinte, sem reiniciar.
 Os imports do agno continuam dentro dos construtores: as funções puras deste módulo
 (prompts e guardrail) são testadas sem carregar o SDK nem exigir chave de API.
+
+O Responder (e SÓ ele) oferece ao modelo as tools que o operador criou no painel
+(`agent/tools_runtime.py`). Sem tool habilitada, o Agent é construído exatamente como na
+entrega — sem `tools=` — e nada no turno muda.
 """
 from __future__ import annotations
 
@@ -17,6 +21,7 @@ import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -31,6 +36,13 @@ Trace = Callable[[dict[str, Any]], None]
 
 # Campos com slot próprio de fallback/diretiva; qualquer outro cai no texto padrão.
 CAMPOS: tuple[str, ...] = ("idade", "veiculo", "cep", "plano", "data_inicio")
+
+# Quem executa a tool é o agno, lá dentro do `arun`, com uma `Function` que foi construída
+# junto com o Agent (cacheado e compartilhado entre conversas) — ela não sabe de qual turno
+# veio a chamada. O vínculo é este ContextVar: `reply` publica a lista do turno antes de
+# chamar o modelo, e cada execução de tool anota nela. Como cada turno roda na sua própria
+# task asyncio, dois leads simultâneos não se misturam.
+_TOOL_CALLS_DO_TURNO: ContextVar[list[dict[str, Any]] | None] = ContextVar("tool_calls_do_turno", default=None)
 
 # --------------------------------------------------------------------------- guardrail
 # Só dinheiro: "R$", "209,90" e "reais". Percentual fica fora porque o lead pode
@@ -443,9 +455,14 @@ class Extractor(_AgenteLLM):
 
 
 class Responder(_AgenteLLM):
-    """Agent conversacional: sem output_schema, com histórico por `session_id`."""
+    """Agent conversacional: sem output_schema, com histórico por `session_id` e as tools do painel."""
 
     papel = "responder"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # `tool_call`s do último `reply` de cada conversa, à espera do turno drenar para o log.
+        self._tool_calls: dict[str, list[dict[str, Any]]] = {}
 
     def _chave(self) -> tuple:
         return (
@@ -453,22 +470,40 @@ class Responder(_AgenteLLM):
             float(store.param("settings.responder_temperature")),
             int(store.param("settings.responder_history_runs")),
             str(self._db_file()),
+            store.custom_tools_version(),   # tool criada/editada/desligada ⇒ Agent novo
         )
 
     def _construir(self) -> Any:
         from agno.agent import Agent
 
-        return Agent(
-            name="autoseguro-responder",
-            model=self._gemini(float(store.param("settings.responder_temperature"))),
-            db=self._sqlite_db(),
-            instructions=_responder_instructions,
-            post_hooks=[_price_guard_hook],
-            add_history_to_context=True,
-            num_history_runs=int(store.param("settings.responder_history_runs")),
-            markdown=False,
-            telemetry=False,
-        )
+        from agent.tools_runtime import carregar_tools
+
+        kwargs: dict[str, Any] = {
+            "name": "autoseguro-responder",
+            "model": self._gemini(float(store.param("settings.responder_temperature"))),
+            "db": self._sqlite_db(),
+            "instructions": _responder_instructions,
+            "post_hooks": [_price_guard_hook],
+            "add_history_to_context": True,
+            "num_history_runs": int(store.param("settings.responder_history_runs")),
+            "markdown": False,
+            "telemetry": False,
+        }
+        # Sem tool habilitada o kwarg `tools` nem existe: o Agent é byte a byte o da entrega.
+        tools = carregar_tools(store, self._registrar_tool_call)
+        if tools:
+            kwargs["tools"] = tools
+        return Agent(**kwargs)
+
+    # ---- tool calls do turno
+    def _registrar_tool_call(self, evento: dict[str, Any]) -> None:
+        chamadas = _TOOL_CALLS_DO_TURNO.get()
+        if chamadas is not None:
+            chamadas.append(evento)
+
+    def drenar_tool_calls(self, conversation_id: str) -> list[dict[str, Any]]:
+        """Entrega ao turno os `tool_call` da última resposta e esquece — quem loga é a Conversation."""
+        return self._tool_calls.pop(conversation_id, [])
 
     async def reply(self, directive: str, state: LeadState, inbound_text: str) -> str:
         """Nunca devolve vazio: LLM fora do ar cai no fallback determinístico do campo."""
@@ -517,6 +552,8 @@ class Responder(_AgenteLLM):
             )
             raise ChamadaLLMFalhou(erro, status_code=status_code)
 
+        chamadas: list[dict[str, Any]] = []
+        token = _TOOL_CALLS_DO_TURNO.set(chamadas)
         try:
             texto = await _com_retry(chamada, **self._retry_kwargs())
         except Exception as exc:  # noqa: BLE001 — o lead não pode ficar sem resposta
@@ -528,6 +565,12 @@ class Responder(_AgenteLLM):
                 erro=(ultimo_erro or "")[:500] or None,
             )
             return degradado
+        finally:
+            _TOOL_CALLS_DO_TURNO.reset(token)
+            if chamadas:
+                if len(self._tool_calls) > 100:
+                    self._tool_calls.clear()   # canal que nunca drena não vira vazamento
+                self._tool_calls[session_id] = chamadas
         return guard_price(texto, state)
 
 

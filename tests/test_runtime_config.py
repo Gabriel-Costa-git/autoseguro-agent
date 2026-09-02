@@ -25,8 +25,10 @@ def store(tmp_path: Path) -> ConfigStore:
 
 
 # ---------------------------------------------------------------- defaults
-def test_ensure_files_cria_os_tres_arquivos(store: ConfigStore) -> None:
-    assert {p.name for p in store.dir.glob("*.json")} == {"prompts.json", "tools.json", "settings.json"}
+def test_ensure_files_cria_os_quatro_arquivos(store: ConfigStore) -> None:
+    assert {p.name for p in store.dir.glob("*.json")} == {
+        "prompts.json", "tools.json", "settings.json", "custom_tools.json",
+    }
 
 
 def test_todo_slot_do_codigo_existe_com_default_igual(store: ConfigStore) -> None:
