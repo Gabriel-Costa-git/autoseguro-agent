@@ -28,7 +28,8 @@ MAESTRO_DIR = CLAUDE_PROJECTS_DIR / "-workspace-autoseguro-agent"
 EXECUTOR_DIRS_GLOB = "-workspace-autoseguro-agent--exec-roles-*"
 
 _GOOGLE_KEY_RE = re.compile(r"(?:AIza[0-9A-Za-z_-]{30,}|AQ\.[0-9A-Za-z_-]{30,})")
-_SECRET_NAME_RE = re.compile(r"KEY|SECRET|TOKEN|PASS|PWD|CREDENTIAL", re.IGNORECASE)
+_SECRET_NAME_RE = re.compile(r"KEY|SECRET|TOKEN|PASS|PWD|CREDENTIAL|URL|HOST|NUMBER|INSTANCE", re.IGNORECASE)
+_PREFIX_MIN = 8  # prefixos de segredo que sobram em comandos de busca também viram <REDACTED>
 _SECRET_MIN_LEN = 12
 _APIKEY_RE = re.compile(r"apikey[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9_-]{16,}", re.IGNORECASE)
 _EMAIL_COUNT_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
@@ -69,6 +70,16 @@ def _load_env_secrets(env_path: Path) -> list[str]:
     return sorted(valores, key=len, reverse=True)
 
 
+def _prefix_res(segredos: list[str]) -> list[re.Pattern[str]]:
+    """Um regex por segredo: token que começa com os primeiros `_PREFIX_MIN` chars dele."""
+    out = []
+    for s in segredos:
+        base = re.sub(r"^https?://", "", s)  # de URL, o que identifica é o host, não o esquema
+        if len(base) >= _PREFIX_MIN and not base.startswith(("localhost", "127.")):
+            out.append(re.compile(re.escape(base[:_PREFIX_MIN]) + r"[A-Za-z0-9_.\-]*"))
+    return out
+
+
 def _scrub_line(linha: str, segredos: list[str], counts: Counter[str]) -> str:
     """Aplica os 4 padrões do brief nesta ordem: valores do .env, chave Google,
     padrão apikey, e-mail (via `agent.pii.mask_text`, que de brinde também
@@ -78,6 +89,9 @@ def _scrub_line(linha: str, segredos: list[str], counts: Counter[str]) -> str:
         if n:
             counts["env_secrets"] += n
             linha = linha.replace(valor, REDACTED)
+    for rx in _prefix_res(segredos):
+        linha, n = rx.subn(REDACTED, linha)
+        counts["secret_prefix"] += n
 
     linha, n = _GOOGLE_KEY_RE.subn(REDACTED, linha)
     counts["google_api_key"] += n
@@ -131,6 +145,7 @@ def check_logs(ai_logs_dir: Path, segredos: list[str]) -> int:
     Vira gate do orquestrador antes do push — não escreve nada, só relata.
     """
     achados: list[str] = []
+    prefixos = _prefix_res(segredos)
     if not ai_logs_dir.is_dir():
         print(f"{ai_logs_dir} não existe; nada para checar.")
         return 0
@@ -148,6 +163,10 @@ def check_logs(ai_logs_dir: Path, segredos: list[str]) -> int:
                     for valor in segredos:
                         if valor and valor in linha:
                             achados.append(f"{arquivo}:{numero}: valor de variável do .env exposto")
+                    for rx in prefixos:
+                        if rx.search(linha):
+                            achados.append(f"{arquivo}:{numero}: prefixo de segredo do .env exposto")
+                            break
                     if _GOOGLE_KEY_RE.search(linha):
                         achados.append(f"{arquivo}:{numero}: possível chave Google (AIza...) exposta")
                     if _APIKEY_RE.search(linha):
