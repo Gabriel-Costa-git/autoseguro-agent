@@ -68,6 +68,8 @@ canal (CLI | Evolution) ──Inbound──▶ conversation.handle
 | `agent/observability.py`, `agent/pii.py` | Log JSONL com ids; mascaramento de PII na borda. |
 | `agent/channels/cli.py`, `agent/channels/evolution.py` | Adaptadores de canal (terminal e WhatsApp). |
 | `scripts/export_ai_logs.py` | Exporta e higieniza as sessões de IA para `ai-logs/`. |
+| `agent/runtime_config.py`, `agent/defaults.py`, `config/` | Textos e parâmetros editáveis com versões, overrides e hot-reload (Studio). |
+| `agent/studio/` | Studio local: Lab, Prompts, Tools, Config (FastAPI + estático, só 127.0.0.1). |
 
 ## Decisões e porquês
 
@@ -224,6 +226,44 @@ em claro. Resultado na entrega: `3 arquivo(s) verificado(s), 0 ocorrência(s) de
 Construído com Claude Code orquestrando executores paralelos (Orq). Em `ai-logs/`:
 `briefs/` (as instruções dadas a cada executor), `reports/` (o que cada um entregou e decidiu)
 e `sessions/` (transcripts `.jsonl` exportados e higienizados por `scripts/export_ai_logs.py`).
+
+## Studio (edição e teste local do agente)
+
+```bash
+uv run python -m agent.studio          # http://127.0.0.1:8765
+scripts/quote_api_falha.sh             # opcional: API de cotação com falha forçada na 8001
+```
+
+Painel de operador, só em `127.0.0.1`, fora do canal Evolution (`agent/serve.py` não sabe que
+ele existe). Quatro abas:
+
+- **Lab** — conversa como lead usando o mesmo `Conversation.handle` da entrega (nunca uma
+  cópia). Ao lado, os eventos ao vivo do turno (extração, decisão da policy, cada tentativa
+  da `/quote` com status e latência, consulta ao ViaCEP, handoff) e o inspetor de **contexto**:
+  o payload exato de cada chamada ao modelo, com as instruções renderizadas, o histórico
+  enviado, a entrada e a saída. Seletor de API de cotação (docker na 8000, falha forçada na 8001).
+- **Prompts** — cada texto do agente é um *slot* com versões nomeadas e uma ativa: prompts do
+  Extractor e do Responder, exemplos de intent, diretivas por campo, fallbacks anti-preço,
+  textos da policy, templates do presenter (cotação, planos, recusa, handoff por motivo) e
+  textos da orquestração. Salvar aplica na hora, sem reiniciar.
+- **Tools** — ficha de cada componente: `quote_client` (endpoints, timeout, tentativas,
+  orçamento, backoff), ViaCEP (liga/desliga, URL, timeout), policy (limites de estagnação,
+  tentativas de CEP, objeções até handoff) e regras (pré-validação local liga/desliga).
+- **Config** — modelo do Gemini, janela de contexto do Responder (quantas mensagens do
+  histórico vão em cada chamada; o Extractor é sem histórico por desenho), temperaturas,
+  retry do LLM, delay do roteiro e caminho do banco de sessão.
+
+Como isso não altera o comportamento entregue:
+
+- Tudo vive em `config/`. `prompts.json` guarda as versões; a versão `default` de cada slot
+  é imutável e igual ao texto em `agent/defaults.py`. `tools.json` e `settings.json` guardam
+  **só overrides**: valor efetivo = override > `.env` > default do código, e a UI mostra a
+  origem de cada valor. Sem override, o agente é exatamente o da entrega.
+- `tests/test_golden_textos.py` compara 26 saídas reais (todas as mensagens do presenter, os
+  prompts renderizados) com snapshots gerados do código entregue antes do refactor.
+- Hot-reload por `mtime`: nada é lido no import, todo consumidor lê o store na chamada.
+- `guard_price` não tem toggle. A formatação de preço e as listas continuam em código; os
+  templates só recebem valores já formatados vindos da API.
 
 ## Limitações conhecidas
 - Estado da conversa em memória (`InMemoryStateStore`); um canal em produção trocaria por
