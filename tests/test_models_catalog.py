@@ -18,7 +18,12 @@ from agent.runtime_config import ConfigStore
 from agent.studio import app as app_mod
 from agent.studio import models_catalog
 from agent.studio.app import build_studio_app
-from agent.studio.models_catalog import ModelsError, atualizar, listar
+from agent.studio.models_catalog import (
+    ModelsError,
+    atualizar,
+    e_modelo_de_texto,
+    listar,
+)
 
 
 # --------------------------------------------------------------------------- dublês
@@ -34,6 +39,32 @@ MODELOS_API = [
     FakeModel("models/gemini-2.5-pro", "Gemini 2.5 Pro", ["generateContent"]),
     FakeModel("models/text-embedding-004", "Embedding 004", ["embedContent"]),   # não conversa
     FakeModel("models/veo-3", "Veo 3", None),                                    # sem ações
+    # Estes DECLARAM generateContent e mesmo assim não servem ao agente:
+    FakeModel("models/gemini-2.5-flash-preview-tts", "Gemini 2.5 Flash TTS", ["generateContent"]),
+    FakeModel("models/gemini-2.5-flash-image", "Nano Banana", ["generateContent"]),
+]
+
+# Amostra do refresh real (40 modelos): o que tem de sobrar é só a coluna da esquerda.
+MODELOS_REAIS = [
+    ("models/gemini-2.5-flash", True),
+    ("models/gemini-2.5-pro", True),
+    ("models/gemini-3.5-flash-lite", True),
+    ("models/gemma-3-27b-it", True),
+    ("models/codegemma-7b-it", True),
+    ("models/gemini-2.5-flash-preview-tts", False),
+    ("models/gemini-2.5-pro-preview-tts", False),
+    ("models/gemini-2.5-flash-image", False),
+    ("models/imagen-4.0-generate-001", False),
+    ("models/veo-3.0-generate-preview", False),
+    ("models/text-embedding-004", False),
+    ("models/embeddinggemma-300m", False),
+    ("models/gemini-live-2.5-flash-preview", False),
+    ("models/gemini-2.5-flash-native-audio-preview", False),
+    ("models/gemini-2.5-flash-exp-native-audio-thinking-dialog", False),
+    ("models/gemini-2.5-computer-use-preview-10-2025", False),
+    ("models/gemini-robotics-er-1.5-preview", False),
+    ("models/paligemma-3b-mix-224", False),
+    ("models/shieldgemma-2-4b-it", False),
 ]
 
 
@@ -71,6 +102,33 @@ def test_atualizar_filtra_grava_e_devolve(tmp_path):
     assert gravado == dados
     assert set(gravado) == {"atualizado_em", "modelos"}
     assert [p.name for p in tmp_path.iterdir()] == ["models.json"]   # escrita atômica, sem .tmp
+
+
+def test_atualizar_deixa_so_modelos_de_texto(tmp_path):
+    """`generateContent` não basta: TTS, imagem, embedding, vídeo, live e afins também o declaram."""
+    fabrica = fabrica_fake(modelos=[FakeModel(nome, None, ["generateContent"]) for nome, _ in MODELOS_REAIS])
+    ids = [m["id"] for m in atualizar(tmp_path, "chave", client_factory=fabrica)["modelos"]]
+
+    assert ids == [nome.removeprefix("models/") for nome, texto in MODELOS_REAIS if texto]
+    for nome, texto in MODELOS_REAIS:
+        assert e_modelo_de_texto(nome.removeprefix("models/")) is texto, nome
+
+
+def test_filtro_de_texto_e_case_insensitive():
+    assert e_modelo_de_texto("Gemini-2.5-Flash-Preview-TTS") is False
+    assert e_modelo_de_texto("Gemini-2.5-Flash-IMAGE") is False
+    assert e_modelo_de_texto("Gemini-2.5-Flash") is True
+
+
+def test_atualizar_sem_modelo_de_texto_levanta(tmp_path):
+    """Catálogo que só tem TTS/imagem é 400, não uma lista vazia no seletor."""
+    fabrica = fabrica_fake(modelos=[
+        FakeModel("models/gemini-2.5-flash-preview-tts", "TTS", ["generateContent"]),
+        FakeModel("models/imagen-4.0-generate-001", "Imagen", ["generateContent"]),
+    ])
+    with pytest.raises(ModelsError):
+        atualizar(tmp_path, "chave", client_factory=fabrica)
+    assert not (tmp_path / "models.json").exists()
 
 
 def test_atualizar_sem_chave_levanta(tmp_path):

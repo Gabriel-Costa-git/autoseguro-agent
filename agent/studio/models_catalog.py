@@ -10,6 +10,11 @@ e a lista muda de mês em mês, não de minuto em minuto.
 Quem SELECIONA o modelo é o `ConfigStore` (`PUT /api/config {"gemini_model": ...}`);
 aqui só existe a lista. Escrita atômica (`tmp` + `os.replace`), o mesmo padrão do
 `ConfigStore`. O cliente é injetável (`client_factory`) para o teste não tocar a rede.
+
+O filtro é mais estrito que `generateContent`: um refresh real trouxe 40 modelos, e TTS,
+geração de imagem, embedding, vídeo, áudio ao vivo e afins também declaram essa ação —
+mas nenhum deles serve para o Extractor/Responder conversarem. Como a família muda a cada
+release, o corte é por marca no id (o que a API chama de `models/<id>`), não por lista fixa.
 """
 from __future__ import annotations
 
@@ -21,6 +26,18 @@ from typing import Any
 
 ARQUIVO = "models.json"
 ACAO_NECESSARIA = "generateContent"
+
+# Marcas no id que denunciam um modelo que não é de texto/chat (ex.: `gemini-2.5-flash-preview-tts`,
+# `gemini-2.5-flash-image`, `gemini-live-2.5-flash-preview`, `gemini-robotics-er-1.5-preview`).
+MARCAS_NAO_TEXTO = (
+    "tts", "image", "imagen", "embedding", "veo", "audio", "live", "native-audio",
+    "computer-use", "robotics",
+    "banana", "lyria", "transcribe", "deep-research", "antigravity", "omni",
+)
+
+# Gemma: as variantes de texto ficam (`gemma-3-27b-it`, `codegemma-*`); saem as que o próprio
+# nome denuncia como outra coisa — visão (`paligemma`) e classificador de segurança (`shieldgemma`).
+MARCAS_GEMMA_NAO_TEXTO = ("paligemma", "shieldgemma")
 
 
 class ModelsError(RuntimeError):
@@ -57,14 +74,20 @@ def listar(config_dir: Path) -> dict[str, Any] | None:
     return {"atualizado_em": dados.get("atualizado_em"), "modelos": modelos}
 
 
+def e_modelo_de_texto(ident: str) -> bool:
+    """`False` para o que responde `generateContent` mas não conversa (TTS, imagem, áudio...)."""
+    baixo = ident.lower()
+    return not any(marca in baixo for marca in MARCAS_NAO_TEXTO + MARCAS_GEMMA_NAO_TEXTO)
+
+
 def _entrada(modelo: Any) -> dict[str, str] | None:
-    """Um `Model` da API vira `{id, nome}`; devolve `None` para o que não gera texto."""
+    """Um `Model` da API vira `{id, nome}`; devolve `None` para o que não serve ao agente."""
     acoes = getattr(modelo, "supported_actions", None) or []
     if ACAO_NECESSARIA not in acoes:
         return None
     nome_api = getattr(modelo, "name", None) or ""
     ident = nome_api.removeprefix("models/")
-    if not ident:
+    if not ident or not e_modelo_de_texto(ident):
         return None
     return {"id": ident, "nome": getattr(modelo, "display_name", None) or ident}
 
@@ -87,7 +110,7 @@ def atualizar(
 
     modelos = [entrada for entrada in (_entrada(m) for m in brutos) if entrada is not None]
     if not modelos:
-        raise ModelsError("a API não devolveu nenhum modelo com generateContent.")
+        raise ModelsError("a API não devolveu nenhum modelo de texto com generateContent.")
 
     dados = {"atualizado_em": datetime.now(UTC).isoformat(), "modelos": modelos}
     _gravar(Path(config_dir), dados)
