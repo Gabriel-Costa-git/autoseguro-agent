@@ -5,9 +5,10 @@ O LLM faz só duas coisas: extrair dados e falar. Ele não decide nada (isso é 
 `guard_price` é a última linha de defesa da regra de ouro: preço só sai da API,
 renderizado pelo `presenter`.
 
-Os imports do agno são feitos dentro dos construtores de propósito: as funções
-puras deste módulo (prompts e guardrail) são testadas sem carregar o SDK nem
-exigir chave de API.
+Textos e parâmetros vêm do `runtime_config.store` NA CHAMADA (nunca no import), então
+editar um prompt ou trocar o modelo no Studio vale no turno seguinte, sem reiniciar.
+Os imports do agno continuam dentro dos construtores: as funções puras deste módulo
+(prompts e guardrail) são testadas sem carregar o SDK nem exigir chave de API.
 """
 from __future__ import annotations
 
@@ -22,25 +23,24 @@ from typing import Any
 
 from agent.config import settings
 from agent.models import CampoColeta, Extraction, Intent, LeadState, QuoteOutcome
+from agent.runtime_config import store
 
 log = logging.getLogger("autoseguro.brain")
+
+Trace = Callable[[dict[str, Any]], None]
+
+# Campos com slot próprio de fallback/diretiva; qualquer outro cai no texto padrão.
+CAMPOS: tuple[str, ...] = ("idade", "veiculo", "cep", "plano", "data_inicio")
 
 # --------------------------------------------------------------------------- guardrail
 # Só dinheiro: "R$", "209,90" e "reais". Percentual fica fora porque o lead pode
 # falar de franquia/desconto sem que a resposta cite valor — o prompt já proíbe.
 _PRECO_RE = re.compile(r"R\$|\d+,\d{2}|\bre[aá]is\b", re.IGNORECASE)
 
-FALLBACKS: dict[str, str] = {
-    "idade": "Pra te cotar direitinho: quantos anos você tem?",
-    "veiculo": "Qual o modelo e o ano de fabricação do carro?",
-    "cep": "Qual o CEP de onde o carro dorme à noite?",
-    "plano": "Qual dos planos você quer que eu cote?",
-    "data_inicio": "A partir de quando você quer o seguro valendo?",
-}
-FALLBACK_PADRAO = (
-    "Valor eu só passo depois que o sistema cotar, pra não te falar bobagem. "
-    "Podemos seguir com os dados?"
-)
+
+def fallback_text(campo: str | None) -> str:
+    """Texto determinístico do campo pendente (slot `fallback.<campo>`)."""
+    return store.text(f"fallback.{campo}") if campo in CAMPOS else store.text("fallback.padrao")
 
 
 def contem_preco(texto: str) -> bool:
@@ -54,6 +54,9 @@ def guard_price(text: str, state: LeadState) -> str:
     Só libera valor quando ele veio da API (`quote_result.outcome == OK`); nesse caso
     o texto com preço é o do `presenter`, não do LLM, e o Responder está apenas
     conversando em cima de uma cotação já apresentada.
+
+    Sem toggle e sem parâmetro: este é o guardrail da regra de ouro, não é
+    configurável pelo Studio.
     """
     cotado = state.quote_result is not None and state.quote_result.outcome is QuoteOutcome.OK
     if cotado or not contem_preco(text):
@@ -66,6 +69,11 @@ def guard_price(text: str, state: LeadState) -> str:
     return _fallback(state)
 
 
+def _fallback(state: LeadState) -> str:
+    """Fallback do campo pendente — nunca deixa o turno sem resposta."""
+    return fallback_text(state.ultima_pergunta)
+
+
 # --------------------------------------------------------------------------- resiliência do LLM
 # O provedor de LLM é a MESMA classe de dependência instável que a `/quote`: a cota
 # gratuita do Gemini é 5 req/min e cada turno gasta 2 chamadas. Fato verificado no
@@ -73,7 +81,7 @@ def guard_price(text: str, state: LeadState) -> str:
 # re-tenta; e `arun` NÃO levanta — ele captura a exceção, marca
 # `run.status = RunStatus.error` e coloca `str(exc)` em `run.content`. Por isso aqui
 # se trata tanto a exceção quanto o run marcado como erro.
-MAX_TENTATIVAS_LLM = 4          # 1 chamada + 3 novas tentativas
+MAX_TENTATIVAS_LLM = 4          # 1 chamada + 3 novas tentativas (default; o Studio ajusta)
 BUDGET_LLM_S = 30.0             # teto de espera somada; acima disso é melhor degradar
 _BACKOFF_S = (2.0, 4.0, 8.0)    # usado quando o provedor não diz o `retryDelay`
 
@@ -86,6 +94,7 @@ _TEXTO_TRANSITORIO = re.compile(
     r"RESOURCE_EXHAUSTED|UNAVAILABLE|DEADLINE_EXCEEDED|rate.?limit|quota|overloaded|timed?.?out|try again",
     re.IGNORECASE,
 )
+
 
 class ChamadaLLMFalhou(RuntimeError):
     """Erro do provedor, venha ele levantado ou lido de um run marcado como ERROR."""
@@ -168,40 +177,35 @@ def _erro_do_run(run: Any) -> str | None:
     return conteudo if isinstance(conteudo, str) and conteudo else "erro sem detalhe do provedor"
 
 
-def _fallback(state: LeadState) -> str:
-    """Texto determinístico para o campo pendente — nunca deixa o turno sem resposta."""
-    return FALLBACKS.get(state.ultima_pergunta or "", FALLBACK_PADRAO)
+def _historico_do_run(run: Any) -> list[dict[str, Any]]:
+    """`RunOutput.messages` (system + histórico + user + assistant) em forma serializável.
+
+    `from_history=True` marca o que o agno puxou da sessão anterior — é o que deixa
+    visível no Lab o que o modelo realmente recebeu além do prompt deste turno.
+    """
+    mensagens = getattr(run, "messages", None) or []
+    out: list[dict[str, Any]] = []
+    for m in mensagens:
+        conteudo = getattr(m, "content", None)
+        out.append(
+            {
+                "role": getattr(m, "role", "?"),
+                "content": conteudo if isinstance(conteudo, str) else str(conteudo),
+                "from_history": bool(getattr(m, "from_history", False)),
+            }
+        )
+    return out
 
 
 # --------------------------------------------------------------------------- prompts
-_INTENT_EXEMPLOS: dict[Intent, str] = {
-    Intent.SAUDACAO: '"oi", "bom dia", "vi o anúncio de vocês"',
-    Intent.FORNECER_DADOS: '"tenho 35", "Onix 2019", "meu cep é 01310-100"',
-    Intent.ESCOLHER_PLANO: '"quero o completo", "pode ser o do meio"',
-    Intent.CONFIRMAR: '"sim", "isso", "correto", "pode ser"',
-    Intent.NEGAR: '"não", "tá errado", "não é esse"',
-    Intent.NAO_SEI: '"não sei o cep", "não lembro o ano"',
-    Intent.ACEITAR: '"fechado", "pode emitir", "quero contratar", "pode passar pro consultor fechar" (depois da cotação, concordar em seguir é ACEITAR)',
-    Intent.RECUSAR: '"não quero mais", "deixa pra lá"',
-    Intent.PEDIR_HUMANO: '"quero falar com um atendente", "me passa pra uma pessoa" (só quando ele quer um humano EM VEZ do bot, não para fechar a cotação)',
-    Intent.OBJECAO_PRECO: '"tá caro", "vi mais barato", "achei salgado"',
-    Intent.PEDIR_DESCONTO: '"tem desconto?", "consegue baixar?", "faz por menos?"',
-    Intent.FORA_DE_ESCOPO: '"bati o carro", "quero ver minha apólice", "seguro de vida"',
-    Intent.OUTRO: "qualquer coisa que não se encaixe nas anteriores",
-}
-
-_CAMPO_DIRETIVA: dict[str, str] = {
-    "idade": "pergunte a idade do condutor principal",
-    "veiculo": "pergunte o modelo e o ano de fabricação do carro",
-    "cep": "pergunte o CEP de onde o carro dorme à noite",
-    "plano": "pergunte qual plano ele quer cotar",
-    "data_inicio": "pergunte a partir de quando ele quer o seguro valendo",
-}
+def _intent_exemplos() -> dict[Intent, str]:
+    """Exemplos por intent, na ordem do enum (slots `intent.<valor>`)."""
+    return {i: store.text(f"intent.{i.value}") for i in Intent}
 
 
 def directive_for_field(campo: CampoColeta, motivo: str | None = None) -> str:
     """Traduz um `AskField` da policy na diretiva em linguagem natural do Responder."""
-    base = _CAMPO_DIRETIVA.get(campo, f"pergunte {campo}")
+    base = store.text(f"diretiva.{campo}") if campo in CAMPOS else f"pergunte {campo}"
     return f"{base} (contexto: {motivo})" if motivo else base
 
 
@@ -223,53 +227,21 @@ def resumo_state(state: LeadState) -> str:
 
 
 def build_extraction_instructions(state: LeadState, today: date) -> str:
-    """Prompt do Extractor: papel, data de hoje, estado, última pergunta e regras."""
-    intents = "\n".join(f"- {i.value}: {ex}" for i, ex in _INTENT_EXEMPLOS.items())
-    ultima = state.ultima_pergunta or "nenhuma"
-    return f"""Você extrai dados estruturados de UMA mensagem de um lead de seguro auto no WhatsApp (pt-BR).
-Você não conversa e não decide nada: só preenche o schema.
-
-Hoje é {today.isoformat()} (ano corrente: {today.year}).
-Já coletado até aqui: {resumo_state(state)}.
-Última pergunta que o consultor fez: {ultima}. Use isso para desambiguar respostas curtas
-("sim" responde a essa pergunta; "35" é idade se a pergunta foi idade; "2019" é ano do carro se a pergunta foi o veículo).
-
-Regras:
-- Extraia SÓ o que a mensagem ATUAL diz. O que já estava coletado não se repete: campo não citado agora = null.
-- idade: número inteiro de anos do condutor. Não confunda com ano do carro.
-- veiculo_texto: como o lead falou ("Onix 2019", "gol quadrado"). veiculo_ano: o ano citado.
-- ano_parece_modelo = true quando veiculo_ano for maior que {today.year} (provável ano-modelo, não de fabricação).
-- cep: copie como o lead escreveu, sem limpar.
-- plano_id: só se ele nomear um plano (essencial, completo, premium).
-- data_inicio: resolva datas relativas para uma data real usando hoje = {today.isoformat()}
-  ("mês que vem" = dia 1 do mês seguinte; "dia 15" = dia 15 do mês corrente, ou do próximo se já passou).
-- data_vaga = true (e data_inicio null) para "quanto antes", "o mais rápido possível", "só estou olhando".
-- observacao: no máximo uma frase curta com algo que o vendedor precise saber. Nunca invente.
-- NUNCA invente preço, valor, desconto ou cobertura. Você não tem essa informação.
-
-intent (escolha exatamente um):
-{intents}"""
+    """Prompt do Extractor (slot `extractor.instructions`): data, estado, última pergunta, intents."""
+    intents = "\n".join(f"- {i.value}: {ex}" for i, ex in _intent_exemplos().items())
+    return store.text(
+        "extractor.instructions",
+        today=today.isoformat(),
+        ano=today.year,
+        resumo=resumo_state(state),
+        ultima=state.ultima_pergunta or "nenhuma",
+        intents=intents,
+    )
 
 
 def build_responder_instructions(state: LeadState, directive: str) -> str:
-    """Prompt do Responder: persona + estado (sem valores) + diretiva do turno + regras duras."""
-    return f"""Você é consultor de vendas da AutoSeguro falando por WhatsApp, em pt-BR.
-Tom: humano, direto, cordial, frases curtas. UMA pergunta por mensagem. No máximo um emoji, e só quando couber.
-Nada de markdown, listas ou textão. Você já está no meio da conversa: não se reapresente a cada mensagem.
-
-Estado da conversa: {resumo_state(state)}.
-
-SUA TAREFA NESTE TURNO: {directive}
-Responda à última mensagem do lead e cumpra essa tarefa. Não faça mais nada além disso.
-
-Regras invioláveis:
-- NUNCA cite preço, valor, mensalidade, franquia em reais, percentual, desconto ou multiplicador.
-  Quem passa valor é o sistema de cotação, em outra mensagem. Se o lead perguntar o preço antes da cotação,
-  diga que precisa dos dados para cotar e siga com a tarefa do turno.
-- NUNCA prometa desconto, condição especial, brinde ou prazo de pagamento.
-- NUNCA peça CPF, e-mail, telefone, placa, RG, endereço completo ou dados bancários.
-- Não invente cobertura, carência nem regra de aceitação. Não repita dados que o lead não deu.
-- Se não souber, diga que vai confirmar com o time."""
+    """Prompt do Responder (slot `responder.instructions`): persona, estado e diretiva do turno."""
+    return store.text("responder.instructions", resumo=resumo_state(state), diretiva=directive)
 
 
 # --------------------------------------------------------------------------- agentes agno
@@ -287,13 +259,25 @@ def _price_guard_hook(run_output: Any, run_context: Any) -> None:
     run_output.content = guard_price(run_output.content, state)
 
 
-class Extractor:
-    """Agent com `output_schema=Extraction`, sem histórico e sem tools.
+def _extractor_instructions(run_context: Any) -> str:
+    deps = getattr(run_context, "dependencies", None) or {}
+    return build_extraction_instructions(deps["state"], deps["today"])
 
-    Sem histórico de propósito: cada mensagem é analisada isolada, e todo o contexto
-    necessário (estado + última pergunta) já vai no prompt — assim a extração é
-    reprodutível e não se contamina com turnos antigos.
+
+def _responder_instructions(run_context: Any) -> str:
+    deps = getattr(run_context, "dependencies", None) or {}
+    return build_responder_instructions(deps["state"], deps["directive"])
+
+
+class _AgenteLLM:
+    """Base dos dois papéis: cache do `agno.Agent` por tupla de parâmetros + trace + retry.
+
+    O Agent do agno recebe modelo/temperatura/histórico na construção, então mudar
+    qualquer um deles no Studio exige reconstruir o objeto. A tupla é conferida a cada
+    chamada (leitura de dicionário em memória, barata) e o Agent só é refeito quando muda.
     """
+
+    papel = "llm"
 
     def __init__(
         self,
@@ -302,26 +286,93 @@ class Extractor:
         *,
         agent: Any | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        trace: Trace | None = None,
     ) -> None:
+        self._model_id = model_id
+        self._db_path = db_path
         self._sleep = sleep
-        if agent is not None:      # dublê nos testes: não carrega o SDK nem exige chave
-            self._agent = agent
-            return
+        self._trace = trace
+        self._agent_injetado = agent      # dublê nos testes: não carrega o SDK nem exige chave
+        self._agent: Any | None = None
+        self._chave_atual: tuple | None = None
 
-        from agno.agent import Agent
+    # ---- parâmetros do store
+    def _modelo(self) -> str:
+        return self._model_id or store.param("settings.gemini_model")
+
+    def _db_file(self) -> Path:
+        return Path(self._db_path or store.param("settings.agent_db_path"))
+
+    def _chave(self) -> tuple:
+        """Tupla que identifica o Agent construído. Mudou ⇒ reconstrói."""
+        raise NotImplementedError
+
+    def _construir(self) -> Any:
+        raise NotImplementedError
+
+    def agente(self) -> Any:
+        """Agent atual, reconstruído se algum parâmetro do store mudou."""
+        if self._agent_injetado is not None:
+            return self._agent_injetado
+        chave = self._chave()
+        if self._agent is None or chave != self._chave_atual:
+            self._agent = self._construir()
+            self._chave_atual = chave
+        return self._agent
+
+    def _sqlite_db(self) -> Any:
         from agno.db.sqlite import SqliteDb
+
+        db_file = self._db_file()
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+        return SqliteDb(db_file=str(db_file))
+
+    def _gemini(self, temperatura: float) -> Any:
         from agno.models.google import Gemini
 
-        db_file = Path(db_path or settings.agent_db_path)
-        db_file.parent.mkdir(parents=True, exist_ok=True)
-        self._agent = Agent(
+        return Gemini(id=self._modelo(), api_key=settings.google_api_key, temperature=temperatura)
+
+    # ---- retry / trace
+    def _retry_kwargs(self) -> dict[str, Any]:
+        return {
+            "sleep": self._sleep,
+            "max_tentativas": int(store.param("settings.llm_max_tentativas")),
+            "budget_s": float(store.param("settings.llm_budget_s")),
+            "papel": self.papel,
+        }
+
+    def emitir_trace(self, **campos: Any) -> None:
+        """Manda um evento de trace para quem injetou o hook. Nunca quebra o turno."""
+        if self._trace is None:
+            return
+        campos.setdefault("papel", self.papel)
+        campos.setdefault("modelo", self._modelo())
+        try:
+            self._trace(campos)
+        except Exception as exc:  # noqa: BLE001 — observabilidade não derruba conversa
+            log.warning("trace falhou (%s): %s", type(exc).__name__, str(exc)[:120])
+
+
+class Extractor(_AgenteLLM):
+    """Agent com `output_schema=Extraction`, sem histórico e sem tools.
+
+    Sem histórico de propósito: cada mensagem é analisada isolada, e todo o contexto
+    necessário (estado + última pergunta) já vai no prompt — assim a extração é
+    reprodutível e não se contamina com turnos antigos.
+    """
+
+    papel = "extractor"
+
+    def _chave(self) -> tuple:
+        return (self._modelo(), float(store.param("settings.extractor_temperature")), str(self._db_file()))
+
+    def _construir(self) -> Any:
+        from agno.agent import Agent
+
+        return Agent(
             name="autoseguro-extractor",
-            model=Gemini(
-                id=model_id or settings.gemini_model,
-                api_key=settings.google_api_key,
-                temperature=0.0,
-            ),
-            db=SqliteDb(db_file=str(db_file)),
+            model=self._gemini(float(store.param("settings.extractor_temperature"))),
+            db=self._sqlite_db(),
             output_schema=Extraction,
             instructions=_extractor_instructions,
             add_history_to_context=False,
@@ -331,97 +382,154 @@ class Extractor:
 
     async def extract(self, text: str, state: LeadState, today: date) -> Extraction:
         """Nunca levanta. Cota estourada / 5xx re-tenta; esgotou, marca `indisponivel`."""
+        session_id = f"extract-{state.conversation_id}"
+        instructions = build_extraction_instructions(state, today)
+        tentativa = 0
+        ultimo_erro: str | None = None
 
         async def chamada() -> Extraction:
-            run = await self._agent.arun(
-                text,
-                session_id=f"extract-{state.conversation_id}",
-                dependencies={"state": state, "today": today},
-            )
+            nonlocal tentativa, ultimo_erro
+            tentativa += 1
+            inicio = time.perf_counter()
+            try:
+                run = await self.agente().arun(
+                    text,
+                    session_id=session_id,
+                    dependencies={"state": state, "today": today},
+                )
+            except Exception as exc:
+                ultimo_erro = str(exc)
+                self.emitir_trace(
+                    session_id=session_id, tentativa=tentativa, instructions=instructions, historico=[],
+                    entrada=text, saida=None, status="erro", latency_ms=_ms(inicio), erro=str(exc)[:500],
+                )
+                raise
+            latency_ms = _ms(inicio)
+            historico = _historico_do_run(run)
             erro = _erro_do_run(run)
-            if erro is not None:
-                raise ChamadaLLMFalhou(erro)
-            if isinstance(run.content, Extraction):
+            if erro is None and isinstance(run.content, Extraction):
+                self.emitir_trace(
+                    session_id=session_id, tentativa=tentativa, instructions=instructions, historico=historico,
+                    entrada=text, saida=run.content.model_dump(mode="json"), status="ok",
+                    latency_ms=latency_ms, erro=None,
+                )
                 return run.content
             # Sem status de erro e fora do schema: o modelo respondeu outra coisa.
             # Não é transitório — re-tentar só queimaria cota.
-            raise ChamadaLLMFalhou(f"conteúdo fora do schema: {type(run.content).__name__}", status_code=422)
+            if erro is None:
+                erro = f"conteúdo fora do schema: {type(run.content).__name__}"
+                status_code: int | None = 422
+            else:
+                status_code = None
+            ultimo_erro = erro
+            self.emitir_trace(
+                session_id=session_id, tentativa=tentativa, instructions=instructions, historico=historico,
+                entrada=text, saida=run.content if isinstance(run.content, str) else None, status="erro",
+                latency_ms=latency_ms, erro=erro[:500],
+            )
+            raise ChamadaLLMFalhou(erro, status_code=status_code)
 
         try:
-            return await _com_retry(chamada, sleep=self._sleep, papel="extractor")
+            return await _com_retry(chamada, **self._retry_kwargs())
         except Exception as exc:  # noqa: BLE001 — o turno continua sem extração
             log.warning("extractor indisponível (%s): %s", type(exc).__name__, str(exc)[:200])
-        return Extraction(intent=Intent.OUTRO, indisponivel=True, observacao="extracao_indisponivel")
+        degradada = Extraction(intent=Intent.OUTRO, indisponivel=True, observacao="extracao_indisponivel")
+        self.emitir_trace(
+            session_id=session_id, tentativa=tentativa, instructions=instructions, historico=[],
+            entrada=text, saida=degradada.model_dump(mode="json"), status="fallback",
+            latency_ms=0, erro=(ultimo_erro or "")[:500] or None,
+        )
+        return degradada
 
 
-class Responder:
+class Responder(_AgenteLLM):
     """Agent conversacional: sem output_schema, com histórico por `session_id`."""
 
-    def __init__(
-        self,
-        model_id: str | None = None,
-        db_path: Path | None = None,
-        *,
-        agent: Any | None = None,
-        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    ) -> None:
-        self._sleep = sleep
-        if agent is not None:      # dublê nos testes
-            self._agent = agent
-            return
+    papel = "responder"
 
+    def _chave(self) -> tuple:
+        return (
+            self._modelo(),
+            float(store.param("settings.responder_temperature")),
+            int(store.param("settings.responder_history_runs")),
+            str(self._db_file()),
+        )
+
+    def _construir(self) -> Any:
         from agno.agent import Agent
-        from agno.db.sqlite import SqliteDb
-        from agno.models.google import Gemini
 
-        db_file = Path(db_path or settings.agent_db_path)
-        db_file.parent.mkdir(parents=True, exist_ok=True)
-        self._agent = Agent(
+        return Agent(
             name="autoseguro-responder",
-            model=Gemini(
-                id=model_id or settings.gemini_model,
-                api_key=settings.google_api_key,
-                temperature=0.4,
-            ),
-            db=SqliteDb(db_file=str(db_file)),
+            model=self._gemini(float(store.param("settings.responder_temperature"))),
+            db=self._sqlite_db(),
             instructions=_responder_instructions,
             post_hooks=[_price_guard_hook],
             add_history_to_context=True,
-            num_history_runs=8,
+            num_history_runs=int(store.param("settings.responder_history_runs")),
             markdown=False,
             telemetry=False,
         )
 
     async def reply(self, directive: str, state: LeadState, inbound_text: str) -> str:
         """Nunca devolve vazio: LLM fora do ar cai no fallback determinístico do campo."""
+        session_id = state.conversation_id
+        instructions = build_responder_instructions(state, directive)
+        entrada = inbound_text or "(sem texto)"
+        tentativa = 0
+        ultimo_erro: str | None = None
 
         async def chamada() -> str:
-            run = await self._agent.arun(
-                inbound_text or "(sem texto)",
-                session_id=state.conversation_id,
-                dependencies={"state": state, "directive": directive},
-            )
+            nonlocal tentativa, ultimo_erro
+            tentativa += 1
+            inicio = time.perf_counter()
+            try:
+                run = await self.agente().arun(
+                    entrada,
+                    session_id=session_id,
+                    dependencies={"state": state, "directive": directive},
+                )
+            except Exception as exc:
+                ultimo_erro = str(exc)
+                self.emitir_trace(
+                    session_id=session_id, tentativa=tentativa, instructions=instructions, historico=[],
+                    entrada=entrada, saida=None, status="erro", latency_ms=_ms(inicio), erro=str(exc)[:500],
+                )
+                raise
+            latency_ms = _ms(inicio)
+            historico = _historico_do_run(run)
             erro = _erro_do_run(run)
-            if erro is not None:
-                raise ChamadaLLMFalhou(erro)
-            texto = run.content.strip() if isinstance(run.content, str) else ""
-            if not texto:
-                raise ChamadaLLMFalhou("resposta vazia do modelo", status_code=422)
-            return texto
+            texto = run.content.strip() if erro is None and isinstance(run.content, str) else ""
+            if erro is None and texto:
+                self.emitir_trace(
+                    session_id=session_id, tentativa=tentativa, instructions=instructions, historico=historico,
+                    entrada=entrada, saida=texto, status="ok", latency_ms=latency_ms, erro=None,
+                )
+                return texto
+            if erro is None:
+                erro = "resposta vazia do modelo"
+                status_code: int | None = 422
+            else:
+                status_code = None
+            ultimo_erro = erro
+            self.emitir_trace(
+                session_id=session_id, tentativa=tentativa, instructions=instructions, historico=historico,
+                entrada=entrada, saida=None, status="erro", latency_ms=latency_ms, erro=erro[:500],
+            )
+            raise ChamadaLLMFalhou(erro, status_code=status_code)
 
         try:
-            texto = await _com_retry(chamada, sleep=self._sleep, papel="responder")
+            texto = await _com_retry(chamada, **self._retry_kwargs())
         except Exception as exc:  # noqa: BLE001 — o lead não pode ficar sem resposta
             log.warning("responder indisponível (%s): %s", type(exc).__name__, str(exc)[:200])
-            return _fallback(state)
+            degradado = _fallback(state)
+            self.emitir_trace(
+                session_id=session_id, tentativa=tentativa, instructions=instructions, historico=[],
+                entrada=entrada, saida=degradado, status="fallback", latency_ms=0,
+                erro=(ultimo_erro or "")[:500] or None,
+            )
+            return degradado
         return guard_price(texto, state)
 
 
-def _extractor_instructions(run_context: Any) -> str:
-    deps = getattr(run_context, "dependencies", None) or {}
-    return build_extraction_instructions(deps["state"], deps["today"])
-
-
-def _responder_instructions(run_context: Any) -> str:
-    deps = getattr(run_context, "dependencies", None) or {}
-    return build_responder_instructions(deps["state"], deps["directive"])
+def _ms(inicio: float) -> int:
+    return int((time.perf_counter() - inicio) * 1000)

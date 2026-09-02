@@ -283,3 +283,57 @@ async def test_get_planos_falha_levanta_excecao_dedicada():
     client, _ = _client(handler)
     with pytest.raises(QuotePlanosUnavailable):
         await client.get_planos()
+
+
+# --------------------------------------------------------------------------- params do Studio
+@pytest.mark.asyncio
+async def test_params_manda_no_numero_de_tentativas_a_cada_chamada():
+    """O Studio muda `max_attempts` e a cotação seguinte já usa o valor novo."""
+    tentativas = {"n": 0}
+    config = {"timeout_s": 3.5, "max_attempts": 2, "budget_s": 15.0, "backoff_base_s": 0.5}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        tentativas["n"] += 1
+        return httpx.Response(503, json={"error": "upstream_unavailable"})
+
+    client, _ = _client(handler, params=lambda: config)
+
+    r1 = await client.quote(_req())
+    assert r1.outcome is QuoteOutcome.INDISPONIVEL and len(r1.attempts) == 2
+
+    config["max_attempts"] = 4
+    r2 = await client.quote(_req())
+    assert len(r2.attempts) == 4
+    assert tentativas["n"] == 6
+
+
+@pytest.mark.asyncio
+async def test_params_define_o_timeout_do_get_planos():
+    vistos: list[float | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        vistos.append(request.extensions.get("timeout", {}).get("read"))
+        return httpx.Response(200, json={"planos": []})
+
+    client, _ = _client(handler, params=lambda: {"timeout_s": 9.0})
+    await client.get_planos()
+    assert vistos == [9.0]
+
+
+@pytest.mark.asyncio
+async def test_sem_params_continua_usando_os_valores_da_instancia():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": "upstream_unavailable"})
+
+    client, _ = _client(handler, max_attempts=3)
+    resultado = await client.quote(_req())
+    assert len(resultado.attempts) == 3
+
+
+@pytest.mark.asyncio
+async def test_params_incompleto_cai_no_valor_da_instancia():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": "upstream_unavailable"})
+
+    client, _ = _client(handler, max_attempts=2, params=lambda: {"timeout_s": 1.0})
+    assert len((await client.quote(_req())).attempts) == 2

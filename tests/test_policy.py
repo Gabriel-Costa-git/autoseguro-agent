@@ -31,7 +31,8 @@ from agent.models import (
     Stage,
     Violation,
 )
-from agent.policy import TXT_INSTABILIDADE, next_action
+from agent.policy import TXT_INSTABILIDADE, TXT_MIDIA, next_action
+from agent.runtime_config import ConfigStore
 
 HOJE = date(2026, 9, 1)
 
@@ -580,3 +581,93 @@ def test_intent_outro_sem_indisponivel_mantem_o_comportamento_antigo():
         _completo(stage=Stage.ESCOLHA_PLANO, plano_id=None), _extr(intent=Intent.OUTRO)
     )
     assert isinstance(acoes[0], AskPlan)
+
+
+# --------------------------------------------------------------------------- Studio (config editável)
+@pytest.fixture
+def store_tmp(tmp_path, monkeypatch):
+    """Store isolado (nunca toca `config/`) injetado no lugar do singleton da policy."""
+    loja = ConfigStore(tmp_path)
+    monkeypatch.setattr("agent.policy.store", loja)
+    return loja
+
+
+def test_trocar_a_versao_ativa_muda_o_texto_na_hora(store_tmp):
+    _, antes = _act(_state(), None)
+    assert antes[0].text == TXT_MIDIA
+
+    store_tmp.add_version("policy.txt_midia", "seca", "Me manda por escrito, por favor.")
+    _, depois = _act(_state(), None)
+    assert depois[0].text == "Me manda por escrito, por favor."
+    assert TXT_MIDIA != depois[0].text  # a constante continua sendo o texto entregue
+
+
+def test_diretiva_de_objecao_tambem_vem_do_slot(store_tmp):
+    store_tmp.add_version("policy.diretiva_objecao", "v2", "diga que o preço é o da tabela")
+    estado = _completo(stage=Stage.APRESENTADO, quote_result=_result())
+    _, acoes = _act(estado, _extr(intent=Intent.OBJECAO_PRECO))
+    assert acoes[0] == Reply(directive="diga que o preço é o da tabela")
+
+
+def test_max_cep_tentativas_zero_segue_sem_cep_na_primeira_falha(store_tmp):
+    store_tmp.set_overrides("tools", {"policy": {"max_cep_tentativas": 0}})
+    s, acoes = _act(_state(idade=35, veiculo_ano=2019, stage=Stage.COLETA_CEP), _extr(cep="abc"))
+    assert isinstance(acoes[0], AskPlan)
+    assert s.cep_ausente is True
+
+
+def test_max_turnos_sem_progresso_um_escala_no_primeiro_turno_parado(store_tmp):
+    store_tmp.set_overrides("tools", {"policy": {"max_turnos_sem_progresso": 1}})
+    _, acoes = _act(_state(), _extr(intent=Intent.SAUDACAO))
+    assert acoes[0].reason is HandoffReason.SEM_PROGRESSO
+
+
+def test_objecoes_ate_handoff_um_escala_na_primeira_objecao(store_tmp):
+    store_tmp.set_overrides("tools", {"policy": {"objecoes_ate_handoff": 1}})
+    estado = _completo(stage=Stage.APRESENTADO, quote_result=_result())
+    _, acoes = _act(estado, _extr(intent=Intent.OBJECAO_PRECO))
+    assert acoes[0].reason is HandoffReason.NEGOCIACAO
+
+
+def _sem_pre_validacao(loja: ConfigStore) -> None:
+    loja.set_overrides("tools", {"rules": {"pre_validacao_local": False}})
+
+
+def test_sem_pre_validacao_local_idade_fora_da_faixa_nao_recusa(store_tmp):
+    """Toggle desligado: quem recusa é a API (422), não a gente."""
+    _sem_pre_validacao(store_tmp)
+    s, acoes = _act(_state(stage=Stage.COLETA_IDADE), _extr(idade=80))
+    assert not any(isinstance(a, Refuse) for a in acoes)
+    assert s.idade == 80
+    assert acoes == [AskField(campo="veiculo")]
+
+
+def test_sem_pre_validacao_local_veiculo_antigo_vai_para_a_api(store_tmp):
+    _sem_pre_validacao(store_tmp)
+    s, acoes = _act(_state(idade=35), _extr(veiculo_ano=2005, veiculo_texto="Corolla 2005"))
+    assert not any(isinstance(a, Refuse) for a in acoes)
+    assert s.veiculo_ano == 2005
+    assert acoes == [AskField(campo="cep")]
+
+
+def test_sem_pre_validacao_local_ano_futuro_ainda_pergunta(store_tmp):
+    """Ano-modelo é UX de coleta, não regra de negócio: continua sendo confirmado."""
+    _sem_pre_validacao(store_tmp)
+    s, acoes = _act(_state(idade=35), _extr(veiculo_ano=2027))
+    assert isinstance(acoes[0], AskField)
+    assert acoes[0].campo == "veiculo"
+    assert s.veiculo_ano is None
+
+
+def test_sem_pre_validacao_local_data_passada_e_aceita(store_tmp):
+    _sem_pre_validacao(store_tmp)
+    s, acoes = _act(_state(idade=35), _extr(data_inicio=date(2026, 1, 1)))
+    assert not any(isinstance(a, SendText) for a in acoes)
+    assert s.data_inicio == date(2026, 1, 1)
+
+
+def test_com_pre_validacao_local_o_comportamento_entregue_continua(store_tmp):
+    """Sem override, o default é ligado — a recusa local acontece como na entrega."""
+    s, acoes = _act(_state(stage=Stage.COLETA_IDADE), _extr(idade=80))
+    assert isinstance(acoes[0], Refuse)
+    assert s.stage is Stage.ENCERRADO_RECUSA

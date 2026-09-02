@@ -48,7 +48,8 @@ class EventBus:
     sem roubar os eventos de outra aba aberta no mesmo Lab.
     """
 
-    def __init__(self, maxlen: int = MAX_HISTORICO) -> None:
+    def __init__(self, conversation_id: str = "", maxlen: int = MAX_HISTORICO) -> None:
+        self.conversation_id = conversation_id
         self._historico: deque[dict[str, Any]] = deque(maxlen=maxlen)
         self._filas: list[asyncio.Queue] = []
 
@@ -74,11 +75,15 @@ class EventBus:
                 pass
 
     def publish_trace(self, trace: dict[str, Any]) -> None:
-        """Hook do `brain`: uma chamada ao modelo (cada tentativa de retry é um evento)."""
+        """Hook do `brain`: uma chamada ao modelo (cada tentativa de retry é um evento).
+
+        `conversation_id` é o da sessão do Lab; o `session_id` do agno (o Extractor usa
+        um separado, `extract-<id>`, por não ter histórico) fica dentro de `data`.
+        """
         self.publish(
             {
                 "ts": datetime.now(UTC).isoformat(),
-                "conversation_id": trace.get("session_id"),
+                "conversation_id": self.conversation_id,
                 "event": "llm_trace",
                 "message_id": None,
                 "quote_id": None,
@@ -182,7 +187,7 @@ class LabManager:
 
     async def create(self, api_url: str | None = None) -> Sessao:
         sid = f"lab-{uuid.uuid4().hex[:8]}"
-        bus = EventBus()
+        bus = EventBus(conversation_id=sid)
         conversation = await self._factory(
             base_url=api_url,
             trace=bus.publish_trace,
@@ -224,8 +229,12 @@ class LabManager:
         sessao = self.sessao(sid)
         return resumir_state(sessao.conversation.store.get(sid))
 
-    async def events(self, sid: str, heartbeat_s: float = HEARTBEAT_S) -> AsyncIterator[dict[str, Any] | None]:
-        """Histórico e, depois, os eventos novos. `None` = bata um heartbeat no SSE."""
+    async def events(self, sid: str, heartbeat_s: float | None = None) -> AsyncIterator[dict[str, Any] | None]:
+        """Histórico e, depois, os eventos novos. `None` = bata um heartbeat no SSE.
+
+        Termina sozinho quando a sessão é encerrada (`close`), para o SSE fechar limpo.
+        """
+        heartbeat_s = HEARTBEAT_S if heartbeat_s is None else heartbeat_s
         sessao = self.sessao(sid)
         fila = sessao.bus.subscribe()
         historico = sessao.bus.historico()   # sem await entre subscribe e snapshot: não duplica nem perde
@@ -336,15 +345,17 @@ def _do_app(request: Request) -> LabManager:
 
 
 class _LabRouter(APIRouter):
-    """Router pronto do Lab que também é fábrica.
+    """Router pronto do Lab que também é fábrica — as duas formas de montar o Lab.
 
-    `app.include_router(router)` monta as rotas usando o manager do `app.state`;
-    `router(manager)` devolve um router novo amarrado a um manager específico (testes).
+    `app.include_router(router)` (é o que o `build_studio_app` faz) monta as rotas usando
+    o manager guardado em `app.state`; `router(manager)` devolve um router novo amarrado a
+    um manager específico, que é como os testes injetam uma `conversation_factory`.
+    Sem `prefix` próprio: os caminhos já vêm completos das rotas copiadas.
     """
 
     def __call__(self, manager: LabManager) -> APIRouter:  # type: ignore[override]
         return _construir_router(lambda _request: manager)
 
 
-router = _LabRouter(prefix="/api/lab", tags=["lab"])
+router = _LabRouter(tags=["lab"])
 router.routes.extend(_construir_router(_do_app).routes)

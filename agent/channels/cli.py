@@ -19,9 +19,9 @@ from agent.config import settings
 from agent.conversation import Conversation, InMemoryStateStore
 from agent.models import Inbound, LeadState, Outbound
 from agent.pii import mask_text
-from agent.policy import TXT_INSTABILIDADE
 from agent.quote_client import QuoteClient, QuotePlanosUnavailable
 from agent.rules import Rules
+from agent.runtime_config import store
 
 PROMPT = "você: "
 AJUDA = "Comandos: /estado (dados coletados), /audio (simula um áudio), /sair."
@@ -31,34 +31,59 @@ class BootError(RuntimeError):
     """Falha de inicialização com mensagem já pronta para o operador."""
 
 
-async def montar_conversa(today: Callable[[], date] = date.today) -> Conversation:
-    """Carrega settings, exige a chave do LLM e deriva as regras do `/planos` da API."""
+def _params_quote_client() -> dict:
+    """Parâmetros do cliente relidos do store a cada chamada (o Studio muda em tempo real)."""
+    return {
+        "timeout_s": store.param("tools.quote_client.timeout_s"),
+        "max_attempts": store.param("tools.quote_client.max_attempts"),
+        "budget_s": store.param("tools.quote_client.budget_s"),
+        "backoff_base_s": store.param("tools.quote_client.backoff_base_s"),
+    }
+
+
+async def montar_conversa(
+    today: Callable[[], date] = date.today,
+    *,
+    base_url: str | None = None,
+    trace: Callable[[dict], None] | None = None,
+    logger_factory: Callable[..., object] | None = None,
+) -> Conversation:
+    """Carrega settings, exige a chave do LLM e deriva as regras do `/planos` da API.
+
+    `base_url` (o Lab aponta cada sessão para uma API), `trace` (hook de observação das
+    chamadas ao LLM) e `logger_factory` são pontos de injeção do Studio; sem eles o boot
+    é exatamente o do canal de terminal e do webhook.
+    """
     if not settings.google_api_key:
         raise BootError("GOOGLE_API_KEY não configurada. Copie .env.example para .env e preencha a chave.")
 
+    api = base_url or store.param("tools.quote_client.base_url")
+    p = _params_quote_client()
     client = QuoteClient(
-        settings.quote_api_url,
-        timeout_s=settings.quote_timeout_s,
-        max_attempts=settings.quote_max_attempts,
-        budget_s=settings.quote_budget_s,
-        backoff_base_s=settings.quote_backoff_base_s,
+        api,
+        timeout_s=p["timeout_s"],
+        max_attempts=p["max_attempts"],
+        budget_s=p["budget_s"],
+        backoff_base_s=p["backoff_base_s"],
+        params=_params_quote_client,
     )
     try:
         planos = await client.get_planos()
     except QuotePlanosUnavailable as exc:
         raise BootError(
-            f"Não consegui ler {settings.quote_api_url}/planos ({exc}). "
+            f"Não consegui ler {api}/planos ({exc}). "
             "Suba a API de cotação antes de abrir o chat — as regras de aceitação saem dela."
         ) from exc
 
     return Conversation(
         rules=Rules.from_planos(planos, today()),
         quote_client=client,
-        extractor=Extractor(),
-        responder=Responder(),
+        extractor=Extractor(trace=trace),
+        responder=Responder(trace=trace),
         log_dir=settings.log_dir,
         store=InMemoryStateStore(),
         today=today,
+        logger_factory=logger_factory,
     )
 
 
@@ -126,19 +151,21 @@ async def conversar(
             inbound = Inbound(conversation_id=conversation_id, message_id=f"m{turno}", text=linha)
 
         await conv.handle(inbound, emit)
-        if roteiro is not None and ultima_saida == TXT_INSTABILIDADE and repeticoes < 2:
+        if roteiro is not None and ultima_saida == store.text("policy.txt_instabilidade") and repeticoes < 2:
             repeticoes += 1
             print(f"[roteiro: agente pediu para repetir, reenviando ({repeticoes}/2)]")
             roteiro.insert(0, linha)
 
 
-async def run(script: Path | None = None, conversation_id: str | None = None, delay: float = 0.0) -> int:
+async def run(script: Path | None = None, conversation_id: str | None = None, delay: float | None = None) -> int:
     try:
         conv = await montar_conversa()
     except BootError as exc:
         print(f"[erro] {exc}")
         return 2
 
+    if delay is None:
+        delay = float(store.param("settings.script_delay_s"))
     cid = conversation_id or f"cli-{int(time.time())}"
     mensagens: list[str] | None = None
     if script is not None:
@@ -158,8 +185,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--delay",
         type=float,
-        default=0.0,
-        help="segundos de espera entre as mensagens do --script (cota do LLM); padrão 0",
+        default=None,
+        help="segundos de espera entre as mensagens do --script (cota do LLM); padrão: settings.script_delay_s",
     )
     args = parser.parse_args(argv)
     return asyncio.run(run(script=args.script, conversation_id=args.conversation_id, delay=args.delay))

@@ -26,6 +26,7 @@ from agent.models import (
     SendText,
 )
 from agent.presenter import render
+from agent.runtime_config import ConfigStore
 
 ESTADO = LeadState(conversation_id="conv_1")
 FONTE_PRESENTER = Path(__file__).resolve().parents[1] / "agent" / "presenter.py"
@@ -208,3 +209,40 @@ def test_send_text_e_repassado_literalmente():
 def test_acoes_do_llm_e_do_cliente_nao_sao_template(action):
     with pytest.raises(ValueError, match="não é ação de template"):
         render(action, ESTADO)
+
+
+# --------------------------------------------------------------------------- Studio (textos editáveis)
+@pytest.fixture
+def store_tmp(tmp_path, monkeypatch):
+    """Store isolado (nunca toca `config/`) injetado no lugar do singleton do presenter."""
+    loja = ConfigStore(tmp_path)
+    monkeypatch.setattr("agent.presenter.store", loja)
+    return loja
+
+
+def test_trocar_a_versao_ativa_muda_a_cta_na_hora(store_tmp):
+    assert "Quer fechar?" in render(_present(), ESTADO)
+    store_tmp.add_version("presenter.present.cta", "direta", "Fecha comigo?")
+    texto = render(_present(), ESTADO)
+    assert texto.endswith("Fecha comigo?")
+    assert "Quer fechar?" not in texto
+
+
+def test_texto_novo_nao_muda_a_formatacao_do_preco(store_tmp):
+    """O template recebe o valor já formatado: editar texto não consegue estragar o número."""
+    store_tmp.add_version("presenter.present.preco", "sem bullet", "Fica em {premio} por mês")
+    texto = render(_present(premio_mensal=1025.14), ESTADO)
+    assert "Fica em R$ 1.025,14 por mês" in texto
+
+
+def test_handoff_e_cobertura_tambem_saem_do_store(store_tmp):
+    store_tmp.add_version("presenter.handoff.negociacao", "curta", "Vou chamar o consultor.")
+    store_tmp.add_version("presenter.cobertura.vidros", "v2", "vidros e faróis")
+    assert render(Handoff(reason=HandoffReason.NEGOCIACAO), ESTADO) == "Vou chamar o consultor."
+    assert "vidros e faróis" in render(_present(), ESTADO)
+
+
+def test_cobertura_desconhecida_cai_no_fallback(store_tmp):
+    """Cobertura nova da API (sem slot) não pode quebrar a apresentação."""
+    texto = render(_present(coberturas=["pneu_furado"]), ESTADO)
+    assert "pneu furado" in texto

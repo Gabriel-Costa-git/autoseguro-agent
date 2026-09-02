@@ -20,9 +20,10 @@ from pathlib import Path
 from typing import Any
 
 from agent.brain import directive_for_field
-from agent.config import settings
+from agent.defaults import SLOTS
 from agent.models import (
     Action,
+    CepInfo,
     Extraction,
     HandoffReason,
     Inbound,
@@ -32,10 +33,15 @@ from agent.models import (
     Stage,
 )
 
+# `config_store` (e não `store`) porque neste módulo `store` já é o store de ESTADO da conversa.
+from agent.runtime_config import store as config_store
+
 log = logging.getLogger("autoseguro.conversation")
 
-TEXTO_ERRO = "Tive um problema aqui do meu lado. Um consultor vai te chamar pra continuar com você."
-TEXTO_LENTO = "Só um instante, estou consultando o sistema..."
+# Compatibilidade: valem o texto ENTREGUE (versão `default`). O texto efetivo, editável
+# no Studio, vem de `config_store.text(...)` na hora de enviar.
+TEXTO_ERRO = SLOTS["conversation.texto_erro"]["default"]
+TEXTO_LENTO = SLOTS["conversation.texto_lento"]["default"]
 
 # Uma rodada extra por efeito (cotação, lookup de CEP) já cobre o fluxo; o limite
 # existe só para nenhum bug de policy virar laço infinito de mensagens.
@@ -91,7 +97,7 @@ class Conversation:
         self.log_dir = Path(log_dir)
         self.store = store
         self._today = today
-        self._cep_timeout_s = cep_timeout_s if cep_timeout_s is not None else settings.viacep_timeout_s
+        self._cep_timeout_s = cep_timeout_s  # None = usa o valor efetivo do store na chamada
 
         if next_action is None:
             from agent.policy import next_action as next_action_real
@@ -177,16 +183,35 @@ class Conversation:
             return state
         if not state.cep:
             return state
-        info = await self._lookup_cep(state.cep, self._cep_timeout_s)
-        state.cep_info = info
-        turno.logger.event(
-            "cep_lookup",
-            message_id=turno.inbound.message_id,
-            existe=info.existe,
-            cidade=info.cidade,
-            uf=info.uf,
-        )
+        if not config_store.param("tools.viacep.enabled"):
+            # Toggle do Studio: sem consulta externa. `existe=None` é o mesmo sinal de
+            # "ViaCEP fora do ar", que a policy já sabe tratar (aceita sem confirmar).
+            state.cep_info = CepInfo(cep=state.cep, existe=None)
+            turno.logger.event(
+                "cep_lookup",
+                message_id=turno.inbound.message_id,
+                skipped=True,
+                existe=None,
+                cidade=None,
+                uf=None,
+            )
+        else:
+            info = await self._lookup_cep(state.cep, self._timeout_cep())
+            state.cep_info = info
+            turno.logger.event(
+                "cep_lookup",
+                message_id=turno.inbound.message_id,
+                existe=info.existe,
+                cidade=info.cidade,
+                uf=info.uf,
+            )
         return await self._decidir_e_executar(state, None, turno, rodada + 1)
+
+    def _timeout_cep(self) -> float:
+        """Timeout do ViaCEP: o injetado (testes) ou o efetivo do store (Studio)."""
+        if self._cep_timeout_s is not None:
+            return self._cep_timeout_s
+        return float(config_store.param("tools.viacep.timeout_s"))
 
     # ------------------------------------------------------------------ ações
     async def _executar(self, state: LeadState, action: Action, turno: _Turno, rodada: int) -> LeadState:
@@ -228,7 +253,8 @@ class Conversation:
 
     async def _cotar(self, state: LeadState, action: Any, turno: _Turno, rodada: int) -> LeadState:
         async def on_slow() -> None:
-            await self._enviar(self._render(SendText(text=TEXTO_LENTO), state), "template", turno)
+            texto = config_store.text("conversation.texto_lento")
+            await self._enviar(self._render(SendText(text=texto), state), "template", turno)
 
         result = await self.quote_client.quote(action.request, on_slow)
         for attempt in result.attempts:
@@ -276,7 +302,7 @@ class Conversation:
         state.stage = Stage.HANDOFF
         state.handoff_reason = HandoffReason.ERRO_INTERNO
         try:
-            await self._enviar(TEXTO_ERRO, "template", turno)
+            await self._enviar(config_store.text("conversation.texto_erro"), "template", turno)
             turno.logger.event(
                 "handoff",
                 message_id=turno.inbound.message_id,

@@ -234,11 +234,21 @@ ERRO_400 = '{"error": {"code": 400, "message": "Invalid JSON payload", "status":
 
 
 @dataclass
+class FakeMessage:
+    """Espelho de `agno.models.message.Message` no que o trace lê."""
+
+    role: str = "user"
+    content: str = ""
+    from_history: bool = False
+
+
+@dataclass
 class FakeRun:
-    """Espelho do `RunOutput` do agno no que o brain lê: `content` e `status`."""
+    """Espelho do `RunOutput` do agno no que o brain lê: `content`, `status` e `messages`."""
 
     content: Any = None
     status: str = "COMPLETED"
+    messages: list[FakeMessage] | None = None
 
 
 def run_erro(mensagem: str = ERRO_429) -> FakeRun:
@@ -282,3 +292,47 @@ class ClockFake:
         atual = self.agora
         self.agora += self.passo
         return atual
+
+
+# --------------------------------------------------------------------------- planos
+# Mesmo formato do `plans.json` da API do desafio, para montar `Rules` sem rede.
+PLANOS: dict = {
+    "moeda": "BRL",
+    "planos": [
+        {"id": "essencial", "nome": "Essencial", "base_mensal": 119.90, "franquia": 4500,
+         "coberturas": ["colisao", "roubo", "furto"]},
+        {"id": "completo", "nome": "Completo", "base_mensal": 209.90, "franquia": 3000,
+         "coberturas": ["colisao", "roubo", "furto", "terceiros", "vidros"]},
+        {"id": "premium", "nome": "Premium", "base_mensal": 339.90, "franquia": 1500,
+         "coberturas": ["colisao", "roubo", "furto", "terceiros", "vidros", "carro_reserva"]},
+    ],
+    "regras": {
+        "faixa_etaria": [
+            {"idade_min": 18, "idade_max": 24, "multiplicador": 1.60},
+            {"idade_min": 25, "idade_max": 29, "multiplicador": 1.25},
+            {"idade_min": 30, "idade_max": 59, "multiplicador": 1.00},
+            {"idade_min": 60, "idade_max": 75, "multiplicador": 1.40},
+            {"idade_min": 76, "idade_max": 200, "recusar": True, "motivo": "Idade acima do limite."},
+        ],
+        "idade_veiculo": [
+            {"anos_min": 0, "anos_max": 5, "multiplicador": 1.00},
+            {"anos_min": 6, "anos_max": 10, "multiplicador": 1.15},
+            {"anos_min": 11, "anos_max": 20, "multiplicador": 1.45},
+            {"anos_min": 21, "anos_max": 200, "recusar": True, "motivo": "Veículo muito antigo."},
+        ],
+        "regiao_cep": {"prefixos_alto_risco": ["07", "08", "21", "26", "59"], "multiplicador": 1.30},
+        "carencia": {"coberturas_com_carencia": ["roubo", "furto"], "dias": 30},
+    },
+}
+
+QUOTE_200: dict = {
+    "plano_id": "completo", "plano_nome": "Completo", "premio_mensal": 209.9, "franquia": 3000,
+    "coberturas": ["colisao", "roubo", "furto", "terceiros", "vidros"],
+    "multiplicadores": {"faixa_etaria": 1.0, "idade_veiculo": 1.15, "regiao": 1.0},
+    "carencia": {"coberturas": ["roubo", "furto"], "dias": 30, "observacao": "Carência de 30 dias."},
+    "moeda": "BRL",
+}
+
+
+async def sem_sono(_segundos: float) -> None:
+    """`sleep` que não dorme — para retry/backoff em tempo zero nos testes."""

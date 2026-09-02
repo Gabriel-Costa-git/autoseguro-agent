@@ -5,13 +5,25 @@ from __future__ import annotations
 
 import httpx
 
-from agent.config import settings
 from agent.models import CepInfo
+from agent.runtime_config import store
 
 
-async def lookup_cep(cep8: str, timeout_s: float = 2.0, client: httpx.AsyncClient | None = None) -> CepInfo:
-    """Consulta `{viacep_url}/{cep8}/json/`. Nunca levanta: erro vira `existe=None`."""
-    url = f"{settings.viacep_url}/{cep8}/json/"
+async def lookup_cep(
+    cep8: str,
+    timeout_s: float | None = None,
+    client: httpx.AsyncClient | None = None,
+    url: str | None = None,
+) -> CepInfo:
+    """Consulta `{viacep_url}/{cep8}/json/`. Nunca levanta: erro vira `existe=None`.
+
+    `timeout_s`/`url` em `None` vêm do store (`tools.viacep.*`) na hora da chamada, para
+    o Studio poder apontar para outro endpoint ou afrouxar o timeout sem reiniciar.
+    """
+    base = (url if url is not None else store.param("tools.viacep.url")).rstrip("/")
+    if timeout_s is None:
+        timeout_s = float(store.param("tools.viacep.timeout_s"))
+    url = f"{base}/{cep8}/json/"
     owns_client = client is None
     http_client = client or httpx.AsyncClient()
     try:

@@ -173,6 +173,65 @@ SLOTS: dict[str, dict] = {
         'label': 'Handoff: sem_progresso', 'grupo': 'presenter', 'placeholders': [],
         'default': 'Acho que por aqui não estou conseguindo te ajudar direito. Vou chamar um consultor pra falar com você.',
     },
+    'presenter.confirm_cep': {
+        'label': 'Confirmação de CEP', 'grupo': 'presenter', 'placeholders': ['cep', 'cidade', 'uf'],
+        'default': 'Achei aqui: {cep} — {cidade}/{uf}. É aí que o carro fica?',
+    },
+    'presenter.ask_plan.cabecalho': {
+        'label': 'Escolha de plano: cabeçalho', 'grupo': 'presenter', 'placeholders': [],
+        'default': 'Tenho três planos. Olha o que cada um cobre:',
+    },
+    'presenter.ask_plan.linha_plano': {
+        'label': 'Escolha de plano: linha de cada plano', 'grupo': 'presenter',
+        'placeholders': ['nome', 'franquia', 'coberturas'],
+        'default': '*{nome}* — franquia de {franquia}. Cobre {coberturas}.',
+    },
+    'presenter.ask_plan.rodape': {
+        'label': 'Escolha de plano: pergunta final', 'grupo': 'presenter', 'placeholders': [],
+        'default': 'Qual deles quer que eu cote pra você?',
+    },
+    'presenter.present.titulo': {
+        'label': 'Cotação: título', 'grupo': 'presenter', 'placeholders': ['plano_nome'],
+        'default': 'Cotei aqui o plano *{plano_nome}*:',
+    },
+    'presenter.present.preco': {
+        'label': 'Cotação: preço mensal', 'grupo': 'presenter', 'placeholders': ['premio'],
+        'default': '• *{premio}/mês*',
+    },
+    'presenter.present.franquia': {
+        'label': 'Cotação: franquia', 'grupo': 'presenter', 'placeholders': ['franquia'],
+        'default': '• Franquia de {franquia}',
+    },
+    'presenter.present.coberturas': {
+        'label': 'Cotação: coberturas', 'grupo': 'presenter', 'placeholders': ['coberturas'],
+        'default': '• Cobre {coberturas}',
+    },
+    'presenter.present.carencia': {
+        'label': 'Cotação: aviso de carência', 'grupo': 'presenter',
+        'placeholders': ['coberturas_carencia', 'dias'],
+        'default': 'Importante: {coberturas_carencia} só passam a valer {dias} dias depois do início da vigência (carência).',
+    },
+    'presenter.present.pro_rata': {
+        'label': 'Cotação: primeiro pagamento pro-rata', 'grupo': 'presenter',
+        'placeholders': ['valor', 'dias', 'premio'],
+        'default': 'O primeiro pagamento fica em {valor}, referente a {dias} dias, e depois {premio}/mês.',
+    },
+    'presenter.present.aviso_cep_ausente': {
+        'label': 'Cotação: aviso de estimativa sem CEP', 'grupo': 'presenter', 'placeholders': [],
+        'default': 'Como não tenho seu CEP, esse valor é uma estimativa e pode subir quando a gente confirmar a região.',
+    },
+    'presenter.present.cta': {
+        'label': 'Cotação: chamada para ação', 'grupo': 'presenter', 'placeholders': [],
+        'default': 'Quer fechar? Um consultor finaliza com você. Ou prefere ver outro plano?',
+    },
+    'presenter.refuse': {
+        'label': 'Recusa: explicação', 'grupo': 'presenter', 'placeholders': ['motivo'],
+        'default': 'Vou ser sincero com você: não temos um plano que se encaixe no seu perfil. O motivo é que {motivo}',
+    },
+    'presenter.refuse.fechamento': {
+        'label': 'Recusa: fechamento', 'grupo': 'presenter', 'placeholders': [],
+        'default': 'Agradeço muito o contato e espero te atender numa outra oportunidade!',
+    },
     'presenter.cobertura.colisao': {
         'label': 'Cobertura legível: colisao', 'grupo': 'presenter', 'placeholders': [],
         'default': 'colisão',
@@ -208,5 +267,53 @@ SLOTS: dict[str, dict] = {
     'conversation.texto_lento': {
         'label': "Conversation: 'só um instante'", 'grupo': 'conversation', 'placeholders': [],
         'default': 'Só um instante, estou consultando o sistema...',
+    },
+    'extractor.instructions': {
+        'label': 'Prompt do Extractor (system)', 'grupo': 'extractor',
+        'placeholders': ['today', 'ano', 'resumo', 'ultima', 'intents'],
+        'default': '''Você extrai dados estruturados de UMA mensagem de um lead de seguro auto no WhatsApp (pt-BR).
+Você não conversa e não decide nada: só preenche o schema.
+
+Hoje é {today} (ano corrente: {ano}).
+Já coletado até aqui: {resumo}.
+Última pergunta que o consultor fez: {ultima}. Use isso para desambiguar respostas curtas
+("sim" responde a essa pergunta; "35" é idade se a pergunta foi idade; "2019" é ano do carro se a pergunta foi o veículo).
+
+Regras:
+- Extraia SÓ o que a mensagem ATUAL diz. O que já estava coletado não se repete: campo não citado agora = null.
+- idade: número inteiro de anos do condutor. Não confunda com ano do carro.
+- veiculo_texto: como o lead falou ("Onix 2019", "gol quadrado"). veiculo_ano: o ano citado.
+- ano_parece_modelo = true quando veiculo_ano for maior que {ano} (provável ano-modelo, não de fabricação).
+- cep: copie como o lead escreveu, sem limpar.
+- plano_id: só se ele nomear um plano (essencial, completo, premium).
+- data_inicio: resolva datas relativas para uma data real usando hoje = {today}
+  ("mês que vem" = dia 1 do mês seguinte; "dia 15" = dia 15 do mês corrente, ou do próximo se já passou).
+- data_vaga = true (e data_inicio null) para "quanto antes", "o mais rápido possível", "só estou olhando".
+- observacao: no máximo uma frase curta com algo que o vendedor precise saber. Nunca invente.
+- NUNCA invente preço, valor, desconto ou cobertura. Você não tem essa informação.
+
+intent (escolha exatamente um):
+{intents}''',
+    },
+    'responder.instructions': {
+        'label': 'Prompt do Responder (system)', 'grupo': 'responder',
+        'placeholders': ['resumo', 'diretiva'],
+        'default': '''Você é consultor de vendas da AutoSeguro falando por WhatsApp, em pt-BR.
+Tom: humano, direto, cordial, frases curtas. UMA pergunta por mensagem. No máximo um emoji, e só quando couber.
+Nada de markdown, listas ou textão. Você já está no meio da conversa: não se reapresente a cada mensagem.
+
+Estado da conversa: {resumo}.
+
+SUA TAREFA NESTE TURNO: {diretiva}
+Responda à última mensagem do lead e cumpra essa tarefa. Não faça mais nada além disso.
+
+Regras invioláveis:
+- NUNCA cite preço, valor, mensalidade, franquia em reais, percentual, desconto ou multiplicador.
+  Quem passa valor é o sistema de cotação, em outra mensagem. Se o lead perguntar o preço antes da cotação,
+  diga que precisa dos dados para cotar e siga com a tarefa do turno.
+- NUNCA prometa desconto, condição especial, brinde ou prazo de pagamento.
+- NUNCA peça CPF, e-mail, telefone, placa, RG, endereço completo ou dados bancários.
+- Não invente cobertura, carência nem regra de aceitação. Não repita dados que o lead não deu.
+- Se não souber, diga que vai confirmar com o time.''',
     },
 }

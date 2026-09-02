@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import TYPE_CHECKING, Any
 
-from agent.config import settings
+from agent.defaults import SLOTS
 from agent.models import (
     Action,
     AskField,
@@ -41,45 +41,41 @@ from agent.models import (
     SendText,
     Stage,
 )
+from agent.runtime_config import store
 
 if TYPE_CHECKING:  # pragma: no cover - só para type hints; o executor A entrega rules.py
     from agent.rules import Rules
 
-# --------------------------------------------------------------------------- textos fixos
-TXT_MIDIA = "Não consigo ouvir áudio/abrir arquivos por aqui. Pode me escrever?"
-TXT_DESPEDIDA = (
-    "Tudo bem, sem problema! Se mudar de ideia é só me chamar por aqui. Obrigado pelo contato."
-)
-TXT_TERMINAL_HANDOFF = (
-    "Um consultor já está com o seu caso e responde por aqui mesmo. "
-    "Pode deixar a mensagem que ele vê."
-)
-TXT_TERMINAL_ENCERRADO = (
-    "Esse atendimento já foi encerrado por aqui. Se quiser retomar, é só chamar "
-    "que um consultor te ajuda."
-)
-TXT_AGUARDE = "Só um instante, estou puxando a cotação certinho pra você."
-TXT_INSTABILIDADE = (
-    "Tive uma instabilidade aqui do meu lado e não consegui ler sua mensagem. Pode repetir?"
-)
-TXT_DATA_PASSADA = (
-    "Essa data de início já passou, então não consigo usar. A vigência começa a "
-    "partir de hoje — se quiser começar depois, me diga outra data."
-)
+# --------------------------------------------------------------------------- textos (slots do Studio)
+def _t(key: str) -> str:
+    """Texto ativo do slot, lido NA CHAMADA (o Studio troca a versão em tempo real)."""
+    return store.text(key)
 
-DIRETIVA_OBJECAO = (
-    "lead achou caro; ofereça ver outro plano (mais franquia = parcela menor); "
-    "NÃO dê desconto nem cite valores novos"
-)
-DIRETIVA_POS_COTACAO = (
-    "lead respondeu depois da cotação sem aceitar nem recusar; retome a dúvida dele "
-    "e pergunte se quer fechar ou ver outro plano; NÃO cite valores novos"
-)
-DIRETIVA_MESMO_PLANO = (
-    "lead repetiu o plano que já está cotado; confirme se quer fechar esse mesmo "
-    "ou ver outro; NÃO cite valores novos"
-)
-MOTIVO_ANO_MODELO = "ano futuro parece ano-modelo; confirmar ano de fabricação"
+
+def _p(nome: str) -> Any:
+    """Parâmetro efetivo de `tools.policy.*`/`tools.rules.*` (override > .env > default)."""
+    return store.param(nome)
+
+
+def _default(key: str) -> str:
+    """Texto entregue do slot. Só para os símbolos de compatibilidade abaixo."""
+    return SLOTS[key]["default"]
+
+
+# Constantes de compatibilidade: valem o texto ENTREGUE (versão `default`), não o ativo.
+# Existem porque `channels/cli.py` e `tests/golden_cases.py` importam esses nomes; o valor
+# efetivo, editável no Studio, vem sempre de `_t(...)` dentro das funções.
+TXT_MIDIA = _default("policy.txt_midia")
+TXT_DESPEDIDA = _default("policy.txt_despedida")
+TXT_TERMINAL_HANDOFF = _default("policy.txt_terminal_handoff")
+TXT_TERMINAL_ENCERRADO = _default("policy.txt_terminal_encerrado")
+TXT_AGUARDE = _default("policy.txt_aguarde")
+TXT_INSTABILIDADE = _default("policy.txt_instabilidade")
+TXT_DATA_PASSADA = _default("policy.txt_data_passada")
+DIRETIVA_OBJECAO = _default("policy.diretiva_objecao")
+DIRETIVA_POS_COTACAO = _default("policy.diretiva_pos_cotacao")
+DIRETIVA_MESMO_PLANO = _default("policy.diretiva_mesmo_plano")
+MOTIVO_ANO_MODELO = _default("policy.motivo_ano_modelo")
 
 STAGES_TERMINAIS = frozenset({Stage.HANDOFF, Stage.ENCERRADO, Stage.ENCERRADO_RECUSA})
 
@@ -137,17 +133,18 @@ def next_action(
 
     # Estado terminal: responde educado, sem reabrir a coleta.
     if s.stage in STAGES_TERMINAIS:
-        texto = TXT_TERMINAL_HANDOFF if s.stage is Stage.HANDOFF else TXT_TERMINAL_ENCERRADO
+        terminal = "handoff" if s.stage is Stage.HANDOFF else "encerrado"
+        texto = _t(f"policy.txt_terminal_{terminal}")
         return s, [SendText(text=texto)]
 
     if extraction is None:
-        return _com_estagnacao(s, [SendText(text=TXT_MIDIA)], progresso=False)
+        return _com_estagnacao(s, [SendText(text=_t("policy.txt_midia"))], progresso=False)
 
     # Extração indisponível (LLM fora): não sabemos o que o lead disse, então NÃO
     # re-executamos o fluxo — foi assim que o lead levou a lista de planos 3x seguidas.
     # Pede para repetir e conta como turno sem progresso: se o LLM ficar fora, escala.
     if extraction.indisponivel:
-        return _com_estagnacao(s, [SendText(text=TXT_INSTABILIDADE)], progresso=False)
+        return _com_estagnacao(s, [SendText(text=_t("policy.txt_instabilidade"))], progresso=False)
 
     intent = extraction.intent
     if intent is Intent.PEDIR_HUMANO:
@@ -156,7 +153,7 @@ def next_action(
         return _handoff(s, HandoffReason.FORA_DE_ESCOPO)
     if intent is Intent.RECUSAR:
         s.stage = Stage.ENCERRADO
-        return s, [SendText(text=TXT_DESPEDIDA)]
+        return s, [SendText(text=_t("policy.txt_despedida"))]
 
     abs_ = _absorver(s, extraction, rules, today)
     if abs_.refuse is not None:
@@ -182,7 +179,7 @@ def next_action(
 
     # Mensagem que chegou enquanto a cotação está em voo e não mudou nada.
     if s.stage is Stage.COTANDO and s.quote_result is None and not abs_.campos_alterados:
-        return s, abs_.avisos + [SendText(text=TXT_AGUARDE)]
+        return s, abs_.avisos + [SendText(text=_t("policy.txt_aguarde"))]
 
     return s, abs_.avisos + _fluxo(s, rules, today)
 
@@ -191,9 +188,13 @@ def next_action(
 def _absorver(s: LeadState, e: Extraction, rules: Rules, today: date) -> _Absorcao:
     """Grava no estado qualquer campo citado, em qualquer estágio (lead não segue roteiro)."""
     out = _Absorcao()
+    # Toggle do Studio: com a pré-validação local desligada, a API de cotação vira a
+    # única autoridade de regra (recusa chega como 422 e vira `Refuse` pós-cotação).
+    # O ano-modelo continua sendo perguntado: aquilo é UX de coleta, não regra de negócio.
+    pre_validacao = bool(_p("tools.rules.pre_validacao_local"))
 
     if e.idade is not None:
-        violacao = rules.validate_idade(e.idade)
+        violacao = rules.validate_idade(e.idade) if pre_validacao else None
         if violacao is not None:
             out.refuse = Refuse(motivo=violacao.motivo)
             return out
@@ -205,9 +206,9 @@ def _absorver(s: LeadState, e: Extraction, rules: Rules, today: date) -> _Absorc
             # Não grava: 2027 quase sempre é ano-modelo, e ano errado vira preço errado.
             s.stage = Stage.COLETA_VEICULO
             s.ultima_pergunta = "veiculo"
-            out.pendencias.append(AskField(campo="veiculo", motivo=MOTIVO_ANO_MODELO))
+            out.pendencias.append(AskField(campo="veiculo", motivo=_t("policy.motivo_ano_modelo")))
         else:
-            violacao = rules.validate_veiculo_ano(e.veiculo_ano)
+            violacao = rules.validate_veiculo_ano(e.veiculo_ano) if pre_validacao else None
             if violacao is not None:
                 out.refuse = Refuse(motivo=violacao.motivo)
                 return out
@@ -223,7 +224,7 @@ def _absorver(s: LeadState, e: Extraction, rules: Rules, today: date) -> _Absorc
         cep8 = rules.normalize_cep(e.cep)
         if cep8 is None:
             s.cep_tentativas += 1
-            if s.cep_tentativas > settings.max_cep_tentativas:
+            if s.cep_tentativas > _p("tools.policy.max_cep_tentativas"):
                 # Insistir mais só irrita: cota sem CEP e avisa que o valor pode subir.
                 s.cep_ausente = True
                 out.campos_alterados = True
@@ -247,7 +248,7 @@ def _absorver(s: LeadState, e: Extraction, rules: Rules, today: date) -> _Absorc
         s.cep_info = None
         s.cep_confirmado = False
         out.campos_alterados = True
-        if s.cep_tentativas > settings.max_cep_tentativas:
+        if s.cep_tentativas > _p("tools.policy.max_cep_tentativas"):
             s.cep_ausente = True
         else:
             s.stage = Stage.COLETA_CEP
@@ -266,9 +267,9 @@ def _absorver(s: LeadState, e: Extraction, rules: Rules, today: date) -> _Absorc
         s.plano_id = e.plano_id
 
     if e.data_inicio is not None and not e.data_vaga:
-        violacao = rules.validate_data_inicio(e.data_inicio)
+        violacao = rules.validate_data_inicio(e.data_inicio) if pre_validacao else None
         if violacao is not None:
-            out.avisos.append(SendText(text=TXT_DATA_PASSADA))
+            out.avisos.append(SendText(text=_t("policy.txt_data_passada")))
         else:
             out.campos_alterados = out.campos_alterados or s.data_inicio != e.data_inicio
             s.data_inicio = e.data_inicio
@@ -290,7 +291,7 @@ def _resolver_cep(s: LeadState) -> list[Action] | None:
         return [ConfirmCep(cep=s.cep or info.cep, cidade=info.cidade or "", uf=info.uf or "")]
 
     s.cep_tentativas += 1
-    if s.cep_tentativas > settings.max_cep_tentativas:
+    if s.cep_tentativas > _p("tools.policy.max_cep_tentativas"):
         s.cep_confirmado = True  # segue com o CEP como está
         return None
     s.stage = Stage.COLETA_CEP
@@ -367,16 +368,16 @@ def _pos_apresentacao(
 
     if e.intent is Intent.OBJECAO_PRECO:
         s.objecoes += 1
-        if s.objecoes >= 2 or _pede_desconto(e):
+        if s.objecoes >= _p("tools.policy.objecoes_ate_handoff") or _pede_desconto(e):
             return _handoff(s, HandoffReason.NEGOCIACAO)
-        return s, [Reply(directive=DIRETIVA_OBJECAO)]
+        return s, [Reply(directive=_t("policy.diretiva_objecao"))]
 
     if abs_.campos_alterados:
         return s, abs_.avisos + _fluxo(s, rules, today)
 
     if e.intent is Intent.ESCOLHER_PLANO:
-        return s, abs_.avisos + [Reply(directive=DIRETIVA_MESMO_PLANO)]
-    return s, abs_.avisos + [Reply(directive=DIRETIVA_POS_COTACAO)]
+        return s, abs_.avisos + [Reply(directive=_t("policy.diretiva_mesmo_plano"))]
+    return s, abs_.avisos + [Reply(directive=_t("policy.diretiva_pos_cotacao"))]
 
 
 def _pede_desconto(e: Extraction) -> bool:
@@ -428,7 +429,7 @@ def _atualizar_estagnacao(
         s.turnos_sem_progresso = 0
         return s, None
     s.turnos_sem_progresso += 1
-    if s.turnos_sem_progresso >= settings.max_turnos_sem_progresso:
+    if s.turnos_sem_progresso >= _p("tools.policy.max_turnos_sem_progresso"):
         s, acoes = _handoff(s, HandoffReason.SEM_PROGRESSO)
         return s, acoes
     return s, None

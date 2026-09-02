@@ -50,6 +50,7 @@ class QuoteClient:
         clock: Callable[[], float] = time.monotonic,
         backoff_base_s: float = 0.5,
         rng: random.Random | None = None,
+        params: Callable[[], dict] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout_s = timeout_s
@@ -60,7 +61,25 @@ class QuoteClient:
         self._clock = clock
         self._backoff_base_s = backoff_base_s
         self._rng = rng or random.Random()
+        self._params = params
         self._planos_cache: dict | None = None
+
+    def _cfg(self) -> tuple[float, int, float, float]:
+        """timeout, tentativas, orçamento e backoff desta chamada.
+
+        Com `params` (o Studio passa um lambda que lê o store), os quatro são relidos a
+        cada chamada — mudar o timeout na UI vale na cotação seguinte, sem reiniciar.
+        `base_url` fica fixo por instância: trocar de API é criar outro client.
+        """
+        if self._params is None:
+            return self._timeout_s, self._max_attempts, self._budget_s, self._backoff_base_s
+        p = self._params() or {}
+        return (
+            float(p.get("timeout_s", self._timeout_s)),
+            int(p.get("max_attempts", self._max_attempts)),
+            float(p.get("budget_s", self._budget_s)),
+            float(p.get("backoff_base_s", self._backoff_base_s)),
+        )
 
     def _new_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(base_url=self._base_url, transport=self._transport)
@@ -69,9 +88,10 @@ class QuoteClient:
         """GET /planos, cacheado em memória após o 1º sucesso (a API é estável, não precisa retry)."""
         if self._planos_cache is not None:
             return self._planos_cache
+        timeout_s, _, _, _ = self._cfg()
         async with self._new_client() as client:
             try:
-                resp = await client.get("/planos", timeout=self._timeout_s)
+                resp = await client.get("/planos", timeout=timeout_s)
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 raise QuotePlanosUnavailable(_short_error(exc)) from exc
         if resp.status_code != 200:
@@ -85,6 +105,7 @@ class QuoteClient:
         on_slow: Callable[[], Awaitable[None]] | None = None,
     ) -> QuoteResult:
         quote_id = "q" + uuid.uuid4().hex[:8]  # prefixo: id só de dígitos seria mascarado como CEP no log
+        timeout_s, max_attempts, budget_s, backoff_base_s = self._cfg()
         payload = req.model_dump(exclude_none=True)
         attempts: list[QuoteAttempt] = []
         start = self._clock()
@@ -95,7 +116,7 @@ class QuoteClient:
             while True:
                 attempt_start = self._clock()
                 try:
-                    resp = await client.post("/quote", json=payload, timeout=self._timeout_s)
+                    resp = await client.post("/quote", json=payload, timeout=timeout_s)
                 except httpx.TimeoutException as exc:
                     latency_ms = _ms(self._clock() - attempt_start)
                     attempts.append(
@@ -125,12 +146,12 @@ class QuoteClient:
                             total_ms=_ms(self._clock() - start),
                         )
 
-                if n >= self._max_attempts:
+                if n >= max_attempts:
                     break
 
-                sleep_s = self._backoff_seconds(n)
+                sleep_s = self._backoff_seconds(n, backoff_base_s)
                 elapsed = self._clock() - start
-                if elapsed + sleep_s + self._timeout_s > self._budget_s:
+                if elapsed + sleep_s + timeout_s > budget_s:
                     break
 
                 await self._sleep(sleep_s)
@@ -184,9 +205,9 @@ class QuoteClient:
         attempts.append(QuoteAttempt(attempt=n, status="bug", http_status=status, latency_ms=latency_ms, error=erro))
         return QuoteOutcome.BUG, None, None, erro
 
-    def _backoff_seconds(self, tentativa_falha: int) -> float:
+    def _backoff_seconds(self, tentativa_falha: int, base_s: float | None = None) -> float:
         """`base * 2**(n-1)` com jitter uniforme ±50%."""
-        base = self._backoff_base_s * (2 ** (tentativa_falha - 1))
+        base = (self._backoff_base_s if base_s is None else base_s) * (2 ** (tentativa_falha - 1))
         jitter = self._rng.uniform(-0.5, 0.5) * base
         return max(0.0, base + jitter)
 

@@ -9,9 +9,9 @@ from datetime import date
 
 import pytest
 
+from agent import brain
 from agent.brain import (
-    FALLBACK_PADRAO,
-    FALLBACKS,
+    CAMPOS,
     MAX_TENTATIVAS_LLM,
     ChamadaLLMFalhou,
     Extractor,
@@ -25,16 +25,19 @@ from agent.brain import (
     build_responder_instructions,
     contem_preco,
     directive_for_field,
+    fallback_text,
     guard_price,
     resumo_state,
 )
 from agent.models import CepInfo, Extraction, Intent, LeadState, Stage
+from agent.runtime_config import ConfigStore
 from tests.fakes import (
     ERRO_400,
     ERRO_429,
     ERRO_429_SEM_DELAY,
     ClockFake,
     FakeAgnoAgent,
+    FakeMessage,
     FakeRun,
     SleepFake,
     quote_indisponivel,
@@ -136,17 +139,17 @@ def test_contem_preco_pega_dinheiro_e_ignora_ano_e_idade():
 def test_guard_price_troca_resposta_com_preco_por_fallback_do_campo():
     state = _state(ultima_pergunta="cep")
     saida = guard_price("Fica uns R$ 180,00 por mês. Qual seu CEP?", state)
-    assert saida == FALLBACKS["cep"]
+    assert saida == fallback_text("cep")
     assert not contem_preco(saida)
 
 
 def test_guard_price_usa_fallback_padrao_sem_pergunta_pendente():
-    assert guard_price("uns 250,00 talvez", _state()) == FALLBACK_PADRAO
+    assert guard_price("uns 250,00 talvez", _state()) == fallback_text(None)
 
 
 def test_guard_price_dispara_mesmo_com_cotacao_indisponivel():
     state = _state(ultima_pergunta="idade", quote_result=quote_indisponivel())
-    assert guard_price("deve dar uns R$ 300", state) == FALLBACKS["idade"]
+    assert guard_price("deve dar uns R$ 300", state) == fallback_text("idade")
 
 
 def test_guard_price_libera_quando_a_cotacao_veio_da_api():
@@ -162,8 +165,8 @@ def test_guard_price_nao_mexe_em_texto_limpo():
 
 
 def test_fallbacks_nao_contem_preco():
-    for texto in [*FALLBACKS.values(), FALLBACK_PADRAO]:
-        assert not contem_preco(texto)
+    for campo in [*CAMPOS, None]:
+        assert not contem_preco(fallback_text(campo))
 
 
 # --------------------------------------------------------------------------- resiliência do LLM
@@ -317,22 +320,187 @@ async def test_responder_re_tenta_e_devolve_o_texto():
 async def test_responder_esgotado_cai_no_fallback_do_campo():
     resp = _responder([run_erro(ERRO_429) for _ in range(4)])
     saida = await resp.reply("peça o CEP", _state(ultima_pergunta="cep"), "moro em SP")
-    assert saida == FALLBACKS["cep"]                # o lead nunca fica sem resposta
+    assert saida == fallback_text("cep")                # o lead nunca fica sem resposta
 
 
 @pytest.mark.asyncio
 async def test_responder_esgotado_sem_pergunta_pendente_usa_fallback_padrao():
     resp = _responder([_Erro(ERRO_429) for _ in range(4)])
-    assert await resp.reply("responda", _state(), "e aí?") == FALLBACK_PADRAO
+    assert await resp.reply("responda", _state(), "e aí?") == fallback_text(None)
 
 
 @pytest.mark.asyncio
 async def test_responder_com_resposta_vazia_nao_devolve_vazio():
     resp = _responder([FakeRun(content="   ")])
-    assert await resp.reply("peça a idade", _state(ultima_pergunta="idade"), "oi") == FALLBACKS["idade"]
+    assert await resp.reply("peça a idade", _state(ultima_pergunta="idade"), "oi") == fallback_text("idade")
 
 
 @pytest.mark.asyncio
 async def test_responder_ainda_passa_pelo_guardrail_de_preco():
     resp = _responder([FakeRun(content="Fica R$ 180,00 por mês!")])
-    assert await resp.reply("peça o CEP", _state(ultima_pergunta="cep"), "quanto fica?") == FALLBACKS["cep"]
+    assert await resp.reply("peça o CEP", _state(ultima_pergunta="cep"), "quanto fica?") == fallback_text("cep")
+
+
+# --------------------------------------------------------------------------- store (Studio)
+def _store_isolado(monkeypatch, tmp_path) -> ConfigStore:
+    """Store próprio (defaults do código) no lugar do singleton, para editar sem sujar o repo."""
+    novo = ConfigStore(tmp_path)
+    monkeypatch.setattr(brain, "store", novo)
+    return novo
+
+
+def test_prompt_do_extractor_vem_do_slot_e_muda_ao_trocar_a_versao(monkeypatch, tmp_path):
+    store = _store_isolado(monkeypatch, tmp_path)
+    assert "Você extrai dados estruturados" in build_extraction_instructions(_state(), HOJE)
+
+    store.add_version("extractor.instructions", "curto", "Hoje é {today}. Estado: {resumo}.")
+    saida = build_extraction_instructions(_state(idade=35), HOJE)
+    assert saida.startswith("Hoje é 2026-09-01. Estado: idade: 35;")
+
+
+def test_prompt_do_responder_vem_do_slot_com_resumo_e_diretiva(monkeypatch, tmp_path):
+    store = _store_isolado(monkeypatch, tmp_path)
+    store.add_version("responder.instructions", "t", "TAREFA: {diretiva} | ESTADO: {resumo}")
+    saida = build_responder_instructions(_state(idade=35), "peça o CEP")
+    assert saida == f"TAREFA: peça o CEP | ESTADO: {resumo_state(_state(idade=35))}"
+
+
+def test_fallback_e_diretiva_saem_dos_slots(monkeypatch, tmp_path):
+    store = _store_isolado(monkeypatch, tmp_path)
+    store.add_version("fallback.cep", "v2", "Me manda o CEP, por favor.")
+    store.add_version("diretiva.cep", "v2", "peça o CEP do lead")
+
+    assert fallback_text("cep") == "Me manda o CEP, por favor."
+    assert directive_for_field("cep") == "peça o CEP do lead"
+    assert directive_for_field("cep", "motivo x") == "peça o CEP do lead (contexto: motivo x)"
+
+
+def test_exemplos_de_intent_saem_dos_slots(monkeypatch, tmp_path):
+    store = _store_isolado(monkeypatch, tmp_path)
+    store.add_version("intent.pedir_desconto", "v2", '"faz um precinho?"')
+    assert '- pedir_desconto: "faz um precinho?"' in build_extraction_instructions(_state(), HOJE)
+
+
+# --------------------------------------------------------------------------- recriação do Agent
+class ExtractorEspiao(Extractor):
+    """Conta quantas vezes o Agent do agno foi construído (sem carregar o SDK)."""
+
+    def __init__(self, **kw) -> None:
+        super().__init__(**kw)
+        self.construidos = 0
+
+    def _construir(self):
+        self.construidos += 1
+        return FakeAgnoAgent([])
+
+
+class ResponderEspiao(Responder):
+    def __init__(self, **kw) -> None:
+        super().__init__(**kw)
+        self.construidos = 0
+
+    def _construir(self):
+        self.construidos += 1
+        return FakeAgnoAgent([])
+
+
+def test_agent_e_reconstruido_quando_o_modelo_muda(monkeypatch, tmp_path):
+    store = _store_isolado(monkeypatch, tmp_path)
+    ex = ExtractorEspiao()
+
+    ex.agente(), ex.agente()
+    assert ex.construidos == 1                      # sem mudança, reaproveita
+
+    store.set_overrides("settings", {"gemini_model": "gemini-outro"})
+    ex.agente()
+    assert ex.construidos == 2
+
+    store.set_overrides("settings", {"extractor_temperature": 0.7})
+    ex.agente()
+    assert ex.construidos == 3
+
+
+def test_responder_reconstroi_ao_mudar_o_tamanho_do_historico(monkeypatch, tmp_path):
+    store = _store_isolado(monkeypatch, tmp_path)
+    resp = ResponderEspiao()
+    resp.agente()
+    store.set_overrides("settings", {"responder_history_runs": 2})
+    resp.agente()
+    assert resp.construidos == 2
+
+
+def test_limites_do_retry_saem_do_store(monkeypatch, tmp_path):
+    store = _store_isolado(monkeypatch, tmp_path)
+    store.set_overrides("settings", {"llm_max_tentativas": 2, "llm_budget_s": 9.0})
+    kwargs = Extractor(agent=FakeAgnoAgent([]))._retry_kwargs()
+    assert kwargs["max_tentativas"] == 2
+    assert kwargs["budget_s"] == 9.0
+    assert kwargs["papel"] == "extractor"
+
+
+# --------------------------------------------------------------------------- hook de trace
+def test_trace_do_extractor_traz_prompt_entrada_e_saida():
+    eventos: list[dict] = []
+    esperada = Extraction(intent=Intent.FORNECER_DADOS, idade=35)
+    run = FakeRun(content=esperada)
+    run.messages = [FakeMessage("system", "instruções..."), FakeMessage("user", "tenho 35")]
+    ex = Extractor(agent=FakeAgnoAgent([run]), sleep=SleepFake(), trace=eventos.append)
+
+    import asyncio
+
+    saida = asyncio.run(ex.extract("tenho 35", _state(conversation_id="c9"), HOJE))
+    assert saida.idade == 35
+    assert len(eventos) == 1
+    ev = eventos[0]
+    assert set(ev) == {
+        "papel", "modelo", "session_id", "tentativa", "instructions",
+        "historico", "entrada", "saida", "status", "latency_ms", "erro",
+    }
+    assert ev["papel"] == "extractor" and ev["status"] == "ok" and ev["tentativa"] == 1
+    assert ev["session_id"] == "extract-c9"
+    assert ev["entrada"] == "tenho 35"
+    assert ev["saida"]["idade"] == 35
+    assert ev["instructions"] == build_extraction_instructions(_state(conversation_id="c9"), HOJE)
+    assert ev["historico"] == [
+        {"role": "system", "content": "instruções...", "from_history": False},
+        {"role": "user", "content": "tenho 35", "from_history": False},
+    ]
+
+
+def test_trace_registra_cada_tentativa_e_o_fallback():
+    eventos: list[dict] = []
+    ex = Extractor(agent=FakeAgnoAgent([run_erro(ERRO_429)] * 4), sleep=SleepFake(), trace=eventos.append)
+
+    import asyncio
+
+    saida = asyncio.run(ex.extract("oi", _state(), HOJE))
+    assert saida.indisponivel is True
+    assert [e["status"] for e in eventos] == ["erro", "erro", "erro", "erro", "fallback"]
+    assert [e["tentativa"] for e in eventos] == [1, 2, 3, 4, 4]
+    assert "RESOURCE_EXHAUSTED" in eventos[0]["erro"]
+    assert eventos[-1]["saida"]["indisponivel"] is True
+
+
+def test_trace_do_responder_marca_fallback_com_o_texto_devolvido():
+    eventos: list[dict] = []
+    resp = Responder(agent=FakeAgnoAgent([run_erro(ERRO_429)] * 4), sleep=SleepFake(), trace=eventos.append)
+
+    import asyncio
+
+    texto = asyncio.run(resp.reply("peça o CEP", _state(ultima_pergunta="cep"), "moro em SP"))
+    assert texto == fallback_text("cep")
+    assert eventos[-1]["status"] == "fallback" and eventos[-1]["saida"] == texto
+    assert eventos[-1]["papel"] == "responder"
+
+
+def test_trace_que_explode_nao_derruba_o_turno():
+    def trace_ruim(_evento: dict) -> None:
+        raise RuntimeError("bug no observador")
+
+    ex = Extractor(
+        agent=FakeAgnoAgent([FakeRun(content=Extraction(idade=40))]), sleep=SleepFake(), trace=trace_ruim
+    )
+
+    import asyncio
+
+    assert asyncio.run(ex.extract("40", _state(), HOJE)).idade == 40

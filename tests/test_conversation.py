@@ -36,6 +36,7 @@ from agent.policy import next_action as next_action_real
 from agent.presenter import render as render_real
 from agent.quote_client import QuoteClient
 from agent.rules import Rules
+from agent.runtime_config import ConfigStore
 from tests.fakes import (
     FakeCepLookup,
     FakeExtractor,
@@ -63,13 +64,14 @@ def montar(
     resultados=None,
     lento=False,
     cep_info=None,
+    lookup=None,
 ):
     logger = FakeLogger(tmp_path, "c-teste")
     policy = ScriptedPolicy(passos)
     extractor = FakeExtractor(extracoes, erro=erro_extractor)
     responder = FakeResponder()
     quote_client = FakeQuoteClient(resultados or [], lento=lento)
-    lookup = FakeCepLookup(cep_info or CepInfo(cep="01310100", existe=True, cidade="São Paulo", uf="SP"))
+    lookup = lookup or FakeCepLookup(cep_info or CepInfo(cep="01310100", existe=True, cidade="São Paulo", uf="SP"))
     conv = Conversation(
         rules=FakeRules(),
         quote_client=quote_client,
@@ -464,3 +466,96 @@ async def test_integracao_api_fora_do_ar_escala_sem_inventar_preco(tmp_path):
     assert all("209,90" not in o.text and "/mês" not in o.text for o in todas)
     eventos = (tmp_path / "c-teste.jsonl").read_text(encoding="utf-8")
     assert '"quote_attempt"' in eventos and eventos.count('"quote_attempt"') == 4
+
+
+# --------------------------------------------------------------------------- Studio (config editável)
+def _config(tmp_path: Path, monkeypatch, **overrides) -> ConfigStore:
+    """Store isolado (nunca toca `config/`) no lugar do singleton do conversation."""
+    loja = ConfigStore(tmp_path / "cfg")
+    if overrides:
+        loja.set_overrides("tools", overrides)
+    monkeypatch.setattr("agent.conversation.config_store", loja)
+    return loja
+
+
+def _passos_cep():
+    def p1(s, e):
+        s.cep = "01310100"
+        s.stage = Stage.CONFIRMA_CEP
+        return s, []
+
+    def p2(s, e):
+        s.cep_confirmado = True
+        s.stage = Stage.ESCOLHA_PLANO
+        return s, [SendText(text="beleza")]
+
+    return [p1, p2]
+
+
+@pytest.mark.asyncio
+async def test_viacep_desligado_nao_consulta_e_aceita_o_cep(tmp_path, monkeypatch):
+    """Toggle do Studio: sem rede, o CEP entra como não confirmado (`existe=None`)."""
+    _config(tmp_path, monkeypatch, viacep={"enabled": False})
+    conv, deps = montar(tmp_path, _passos_cep(), extracoes=[Extraction(cep="01310-100")])
+    state, saidas = await falar(conv, "01310-100", 1)
+
+    assert deps["lookup"].chamadas == []
+    assert state.cep_info == CepInfo(cep="01310100", existe=None)
+    assert saidas[0].text == "beleza"
+    lookup_ev = next(e for e in deps["logger"].eventos() if e["event"] == "cep_lookup")
+    assert lookup_ev["data"]["skipped"] is True
+    assert lookup_ev["data"]["existe"] is None
+
+
+@pytest.mark.asyncio
+async def test_viacep_ligado_continua_consultando(tmp_path, monkeypatch):
+    _config(tmp_path, monkeypatch)
+    conv, deps = montar(tmp_path, _passos_cep(), extracoes=[Extraction(cep="01310-100")])
+    state, _ = await falar(conv, "01310-100", 1)
+
+    assert deps["lookup"].chamadas == ["01310100"]
+    assert state.cep_info.existe is True
+    lookup_ev = next(e for e in deps["logger"].eventos() if e["event"] == "cep_lookup")
+    assert "skipped" not in lookup_ev["data"]
+
+
+@pytest.mark.asyncio
+async def test_timeout_do_viacep_vem_do_store_quando_nao_injetado(tmp_path, monkeypatch):
+    _config(tmp_path, monkeypatch, viacep={"timeout_s": 0.25})
+    vistos: list[float] = []
+
+    async def lookup(cep8: str, timeout_s: float = 2.0) -> CepInfo:
+        vistos.append(timeout_s)
+        return CepInfo(cep=cep8, existe=True, cidade="São Paulo", uf="SP")
+
+    conv, _ = montar(tmp_path, _passos_cep(), extracoes=[Extraction(cep="01310-100")], lookup=lookup)
+    await falar(conv, "01310-100", 1)
+    assert vistos == [0.25]
+
+
+@pytest.mark.asyncio
+async def test_texto_lento_vem_do_slot_ativo(tmp_path, monkeypatch):
+    loja = _config(tmp_path, monkeypatch)
+    loja.add_version("conversation.texto_lento", "v2", "Aguenta aí que estou consultando.")
+
+    def p1(s, e):
+        return s, [DoQuote(request=quote_request())]
+
+    def p2(s, e):
+        s.stage = Stage.APRESENTADO
+        return s, [Present(result=s.quote_result)]
+
+    conv, _ = montar(tmp_path, [p1, p2], extracoes=[Extraction()], resultados=[quote_ok()], lento=True)
+    _, saidas = await falar(conv, "completo", 1)
+    assert saidas[0].text == "Aguenta aí que estou consultando."
+
+
+@pytest.mark.asyncio
+async def test_texto_de_erro_vem_do_slot_ativo(tmp_path, monkeypatch):
+    loja = _config(tmp_path, monkeypatch)
+    loja.add_version("conversation.texto_erro", "v2", "Deu ruim aqui; já chamei alguém.")
+
+    conv, _ = montar(tmp_path, [], erro_extractor=RuntimeError("boom"))
+    state, saidas = await falar(conv, "oi", 1)
+    assert saidas[0].text == "Deu ruim aqui; já chamei alguém."
+    assert state.stage is Stage.HANDOFF
