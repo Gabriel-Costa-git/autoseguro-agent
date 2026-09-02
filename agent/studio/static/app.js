@@ -88,16 +88,49 @@ function badgeOrigem(origem) {
 
 // -------------------------------------------------------------------------- router (hash → aba)
 const TABS = ["lab", "prompts", "tools", "config"];
+const TAB_LABELS = { lab: "Lab", prompts: "Prompts", tools: "Tools", config: "Config" };
 
 function abaAtual() {
   const h = (location.hash || "#lab").slice(1);
   return TABS.includes(h) ? h : "lab";
 }
 
+// Breadcrumb da barra superior: `Studio / <Aba> / <item>`. Cada aba guarda o seu último
+// item (label do slot, id curto da sessão…); Tools/Config não têm item.
+const Breadcrumb = {
+  itens: { lab: null, prompts: null, tools: null, config: null },
+
+  set(tab, item) {
+    this.itens[tab] = item || null;
+    if (abaAtual() === tab) this.render();
+  },
+
+  render() {
+    const tab = abaAtual();
+    const partes = ["Studio", TAB_LABELS[tab]];
+    if (this.itens[tab]) partes.push(this.itens[tab]);
+    const el = document.getElementById("breadcrumb");
+    el.innerHTML = "";
+    partes.forEach((parte, i) => {
+      if (i > 0) {
+        const sep = document.createElement("span");
+        sep.className = "sep";
+        sep.textContent = "/";
+        el.appendChild(sep);
+      }
+      const span = document.createElement("span");
+      span.className = "crumb" + (i === partes.length - 1 ? " current" : "");
+      span.textContent = parte; // textContent: nada de innerHTML com dado da API
+      el.appendChild(span);
+    });
+  },
+};
+
 function renderTab() {
   const tab = abaAtual();
   for (const t of TABS) document.getElementById(`tab-${t}`).hidden = t !== tab;
   document.querySelectorAll("#tabs a").forEach((a) => a.classList.toggle("active", a.dataset.tab === tab));
+  Breadcrumb.render();
   onTabShown(tab);
 }
 
@@ -188,8 +221,10 @@ const Prompts = {
     const slot = this.slots[key];
     if (!slot) {
       el.innerHTML = '<p class="muted">Selecione um slot à esquerda.</p>';
+      Breadcrumb.set("prompts", null);
       return;
     }
+    Breadcrumb.set("prompts", slot.label);
     const versionName = versionExiste(slot, this.selectedVersion) ? this.selectedVersion : slot.active;
     this.selectedVersion = versionName;
     const version = slot.versions[versionName];
@@ -694,6 +729,7 @@ const Lab = {
     this.turnoAtual = null;
     this.turnoSelecionado = null;
     document.getElementById("lab-session-id").textContent = `sessão ${data.id} · ${data.api || "(padrão)"}`;
+    Breadcrumb.set("lab", String(data.id).slice(0, 8));
     document.getElementById("lab-messages").innerHTML = "";
     document.getElementById("lab-events-list").innerHTML = "";
     document.getElementById("lab-context-body").innerHTML = '<p class="muted">Selecione um turno (bolha do lead) para ver o contexto.</p>';

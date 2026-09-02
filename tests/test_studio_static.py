@@ -1,6 +1,7 @@
-"""Testes dos estáticos do Studio: só confere que os 3 arquivos são servidos e que
-`index.html` referencia `app.js`/`style.css` — o conteúdo/comportamento da UI em si
-não é testável sem um browser real (é o que o reporte descreve em texto).
+"""Testes dos estáticos do Studio: confere que os arquivos são servidos, que
+`index.html` referencia `app.js`/`style.css` e que o shell traz as 4 abas (`data-tab`)
+— o conteúdo/comportamento da UI em si não é testável sem um browser real (é o que o
+reporte descreve em texto).
 """
 from __future__ import annotations
 
@@ -48,3 +49,12 @@ def test_style_css_e_servido_em_static(client: TestClient):
     assert resp.status_code == 200
     assert "text/css" in resp.headers["content-type"]
     assert ".shell" in resp.text
+
+
+def test_index_tem_data_tab_para_as_quatro_abas(client: TestClient):
+    """A barra superior traz as 4 abas como links segmentados (`data-tab` é o que o
+    roteador do app.js usa para marcar a ativa)."""
+    resp = client.get("/")
+    assert resp.status_code == 200
+    for aba in ("lab", "prompts", "tools", "config"):
+        assert f'data-tab="{aba}"' in resp.text

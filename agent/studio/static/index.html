@@ -8,27 +8,29 @@
   </head>
   <body>
     <div id="app" class="shell">
-      <nav class="sidebar">
-        <div class="brand">AutoSeguro<br /><span>Studio</span></div>
-        <ul class="tabs" id="tabs">
-          <li><a href="#lab" data-tab="lab">Lab</a></li>
-          <li><a href="#prompts" data-tab="prompts">Prompts</a></li>
-          <li><a href="#tools" data-tab="tools">Tools</a></li>
-          <li><a href="#config" data-tab="config">Config</a></li>
-        </ul>
-        <div class="sidebar-footer">
-          <div>Studio · 127.0.0.1</div>
-          <div class="health">
+      <!-- barra superior: marca + breadcrumb à esquerda; abas + health à direita -->
+      <header class="topbar">
+        <div class="topbar-left">
+          <span class="brand">AutoSeguro Studio</span>
+          <nav class="breadcrumb" id="breadcrumb" aria-label="Trilha"></nav>
+        </div>
+        <div class="topbar-right">
+          <nav class="tabs" id="tabs" aria-label="Abas">
+            <a href="#lab" data-tab="lab">Lab</a>
+            <a href="#prompts" data-tab="prompts">Prompts</a>
+            <a href="#tools" data-tab="tools">Tools</a>
+            <a href="#config" data-tab="config">Config</a>
+          </nav>
+          <div class="health" title="Studio · 127.0.0.1">
             <span id="health-dot" class="health-dot"></span>
             <span id="health-text">checando...</span>
           </div>
         </div>
-      </nav>
+      </header>
 
       <main class="content">
         <!-- ------------------------------------------------------------ LAB -->
         <section id="tab-lab" class="tab-panel" hidden>
-          <h2 class="tab-title">Lab</h2>
           <div class="lab-topbar">
             <label class="field">
               API de cotação
@@ -50,10 +52,7 @@
               <div id="lab-messages" class="messages"></div>
               <div id="lab-typing" class="typing" hidden>digitando…</div>
               <div class="chat-input-row">
-                <label class="field" style="flex:1">
-                  <span class="muted" style="display:none">Mensagem</span>
-                  <input id="lab-input" type="text" placeholder="Mensagem..." disabled />
-                </label>
+                <input id="lab-input" type="text" placeholder="Mensagem..." aria-label="Mensagem" disabled />
                 <button id="lab-send" type="button" disabled>Enviar</button>
                 <button id="lab-audio" type="button" disabled>Áudio (mídia)</button>
               </div>
@@ -80,7 +79,6 @@
 
         <!-- ------------------------------------------------------------ PROMPTS -->
         <section id="tab-prompts" class="tab-panel" hidden>
-          <h2 class="tab-title">Prompts</h2>
           <div class="prompts-layout">
             <div class="prompts-list-col">
               <label class="field">
@@ -97,14 +95,12 @@
 
         <!-- ------------------------------------------------------------ TOOLS -->
         <section id="tab-tools" class="tab-panel" hidden>
-          <h2 class="tab-title">Tools</h2>
           <p class="notice">guard_price não é configurável por regra.</p>
           <div id="tools-cards" class="cards-grid"></div>
         </section>
 
         <!-- ------------------------------------------------------------ CONFIG -->
         <section id="tab-config" class="tab-panel" hidden>
-          <h2 class="tab-title">Config</h2>
           <div id="config-card" class="card"></div>
         </section>
       </main>
