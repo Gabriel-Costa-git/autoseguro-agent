@@ -93,7 +93,10 @@ button {
 button:hover:not(:disabled) { background: var(--surface-2); }
 button:disabled { opacity: .5; cursor: not-allowed; }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
-button.primary:hover:not(:disabled) { filter: brightness(1.08); }
+/* precisa repetir background aqui: button:hover:not(:disabled) acima tem a mesma
+   especificidade de button.primary e, sem isso, "ganha" no empate e apaga o azul
+   (texto branco de .primary fica invisível no cinza claro do hover genérico) */
+button.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); }
 button.danger { color: var(--danger); border-color: var(--danger-bg); }
 button.small { padding: 3px 8px; font-size: 12px; }
 button.loading { position: relative; color: transparent !important; }
