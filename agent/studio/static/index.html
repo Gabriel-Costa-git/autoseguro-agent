@@ -30,51 +30,42 @@
 
       <main class="content">
         <!-- ------------------------------------------------------------ LAB -->
-        <section id="tab-lab" class="tab-panel pad" hidden>
-          <div class="lab-topbar">
-            <label class="field">
-              API de cotação
-              <select id="lab-api-select"></select>
-            </label>
-            <label class="field">
-              URL livre
-              <input id="lab-api-custom" type="text" placeholder="http://localhost:8000" />
-            </label>
+        <section id="tab-lab" class="tab-panel lab-page" hidden>
+          <div class="lab-head">
+            <div class="lab-head-left">
+              <span class="muted">sessão</span>
+              <span class="mono" id="lab-session-id">(sem sessão)</span>
+              <button type="button" class="icon" id="lab-copy-id" title="Copiar id da sessão" aria-label="Copiar id da sessão" disabled>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+              </button>
+            </div>
             <button id="lab-new-session" class="primary" type="button">Nova sessão</button>
-            <span id="lab-session-id" class="muted"></span>
           </div>
 
-          <div id="lab-unavailable" class="notice warn" hidden>Lab indisponível.</div>
+          <div class="lab-body">
+            <div class="lab-chat" id="lab-chat"></div>
 
-          <div id="lab-body" class="lab-columns">
-            <div class="lab-col lab-chat">
-              <h3>Chat</h3>
-              <div id="lab-messages" class="messages"></div>
-              <div id="lab-typing" class="typing" hidden>digitando…</div>
-              <div class="chat-input-row">
-                <input id="lab-input" type="text" placeholder="Mensagem..." aria-label="Mensagem" disabled />
-                <button id="lab-send" type="button" disabled>Enviar</button>
-                <button id="lab-audio" type="button" disabled>Áudio (mídia)</button>
+            <aside class="lab-side">
+              <div class="lab-side-head">
+                <div class="segmented" id="lab-side-tabs">
+                  <button type="button" data-pane="eventos" class="active">Eventos</button>
+                  <button type="button" data-pane="contexto">Contexto</button>
+                  <button type="button" data-pane="estado">Estado</button>
+                </div>
               </div>
-            </div>
-
-            <div class="lab-col lab-events">
-              <h3>Eventos ao vivo</h3>
-              <div id="lab-events-list" class="events-list"></div>
-            </div>
-
-            <div class="lab-col lab-context">
-              <h3>Contexto</h3>
-              <div id="lab-context-body" class="context-body">
-                <p class="muted">Selecione um turno (bolha do lead) para ver o contexto.</p>
+              <div class="lab-pane" id="lab-pane-eventos">
+                <div id="lab-events-list" class="events-list"></div>
               </div>
-            </div>
+              <div class="lab-pane" id="lab-pane-contexto" hidden>
+                <div id="lab-context-body" class="context-body">
+                  <p class="muted">Selecione um turno (bolha do lead) para ver o contexto.</p>
+                </div>
+              </div>
+              <div class="lab-pane" id="lab-pane-estado" hidden>
+                <pre id="lab-state-json">(sem sessão)</pre>
+              </div>
+            </aside>
           </div>
-
-          <details id="lab-state-panel" class="state-panel">
-            <summary>Estado</summary>
-            <pre id="lab-state-json">(sem sessão)</pre>
-          </details>
         </section>
 
         <!-- ------------------------------------------------------------ PROMPTS -->
@@ -175,34 +166,7 @@
               <a class="link" href="#lab" id="test-ver-eventos" hidden>ver eventos no Lab</a>
             </div>
 
-            <div class="pp-test-body" id="test-body" hidden>
-              <div id="test-unavailable" class="notice warn" hidden>Lab indisponível.</div>
-              <div class="chat-area">
-                <div class="chat-scroll" id="test-messages" hidden></div>
-                <div class="empty-state" id="test-empty">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
-                  <div class="empty-1">Teste o agente enviando uma mensagem.</div>
-                  <div class="empty-2">O agente usa a versão ATIVA de cada slot — ative a versão para testá-la.</div>
-                </div>
-              </div>
-              <div class="chat-foot">
-                <div class="chat-foot-row">
-                  <select id="test-api" aria-label="API de cotação"></select>
-                  <input type="text" id="test-api-custom" placeholder="http://localhost:8000" aria-label="URL livre da API" hidden />
-                  <button type="button" class="chip-ro" id="test-gemini" title="ver em Config">Gemini · —</button>
-                  <span class="muted" id="test-typing" hidden>digitando…</span>
-                </div>
-                <div class="composer">
-                  <button type="button" class="composer-x" id="test-clear" title="Limpar" aria-label="Limpar">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
-                  </button>
-                  <input type="text" id="test-input" placeholder="Envie uma mensagem para testar o prompt…" aria-label="Mensagem de teste" />
-                  <button type="button" class="composer-send" id="test-send" title="Enviar" aria-label="Enviar">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13" /><path d="M22 2l-7 20-4-9-9-4Z" /></svg>
-                  </button>
-                </div>
-              </div>
-            </div>
+            <div class="pp-test-body" id="test-body" hidden></div>
           </div>
         </section>
 
@@ -218,6 +182,41 @@
         </section>
       </main>
     </div>
+
+    <!-- componente de chat: mesmo markup no Lab e no "Testar prompt" (clonado pelo app.js) -->
+    <template id="tpl-chat">
+      <div class="chat">
+        <div class="notice warn chat-unavailable" hidden>Lab indisponível.</div>
+        <div class="chat-area">
+          <div class="chat-scroll" hidden></div>
+          <div class="empty-state">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+            <div class="empty-1"></div>
+            <div class="empty-2"></div>
+          </div>
+        </div>
+        <div class="chat-foot">
+          <div class="chat-foot-row">
+            <select class="chat-api" aria-label="API de cotação" autocomplete="off"></select>
+            <input type="text" class="chat-api-custom" placeholder="http://localhost:8000" aria-label="URL livre da API" autocomplete="off" hidden />
+            <button type="button" class="chip-ro chat-gemini" title="ver em Config">Gemini · —</button>
+            <span class="muted chat-typing" hidden>digitando…</span>
+          </div>
+          <div class="composer">
+            <button type="button" class="composer-x chat-clear" title="Limpar" aria-label="Limpar">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+            </button>
+            <input type="text" class="chat-input" aria-label="Mensagem" />
+            <button type="button" class="composer-mic chat-mic" title="Áudio (mídia)" aria-label="Áudio (mídia)" hidden>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><path d="M12 19v3" /></svg>
+            </button>
+            <button type="button" class="composer-send chat-send" title="Enviar" aria-label="Enviar">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13" /><path d="M22 2l-7 20-4-9-9-4Z" /></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </template>
 
     <!-- painel lateral do "Diff vs default" -->
     <div class="drawer" id="diff-drawer" hidden>

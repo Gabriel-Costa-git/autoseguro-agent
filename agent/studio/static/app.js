@@ -865,19 +865,24 @@ function summarizeEvent(ev) {
 }
 
 // -------------------------------------------------------------------------- sessão do Lab (compartilhada)
-// Uma sessão só para as duas telas que conversam com o agente: a aba Lab e o "Testar prompt"
-// da aba Prompts. Uma única conexão SSE, com fan-out para os assinantes — assim as duas veem
-// exatamente os mesmos eventos, na mesma ordem, sem abrir dois streams do mesmo `/events`.
+// UMA sessão por aba do navegador, usada pelas duas telas que conversam com o agente (aba Lab e
+// "Testar prompt"). O id fica no `sessionStorage`: um F5 retoma a MESMA sessão em vez de abrir
+// outra e deixar a anterior órfã no servidor. Uma única conexão SSE, com fan-out para os
+// assinantes — as duas telas veem os mesmos eventos, na mesma ordem.
+const SESSAO_KEY = "studio.lab.sessao";
+
 const LabSession = {
   id: null,
-  api: "",
+  api: "", // URL de cotação EFETIVA da sessão (a que o backend devolveu)
   es: null,
   endpoints: {}, // rótulo -> url (de /api/effective)
   geminiModel: "",
   apiEscolhida: "", // "" = deixa o agente usar a base_url dele
   mensagens: [], // {lado: "lead"|"agent", texto, source?, turno?}
+  turno: null, // message_id do inbound corrente (etiqueta as mensagens do turno)
   ouvintes: new Set(),
   _criando: null,
+  _retomando: null,
 
   subscribe(fn) {
     this.ouvintes.add(fn);
@@ -895,10 +900,81 @@ const LabSession = {
     this._emitir({ tipo: "efetivo" });
   },
 
-  /** A API de cotação é fixada quando a sessão é criada — trocá-la exige sessão nova. */
+  // ---- ciclo de vida
+  /** Boot: tenta retomar a sessão desta aba antes de qualquer coisa criar uma nova. */
+  iniciar() {
+    this._retomando = this._retomar()
+      .catch(() => null)
+      .finally(() => {
+        this._retomando = null;
+      });
+    return this._retomando;
+  },
+
+  async _retomar() {
+    const salvo = lerSessaoSalva();
+    if (!salvo) return null;
+    let estado;
+    try {
+      estado = await api(`/api/lab/sessions/${encodeURIComponent(salvo.id)}/state`);
+    } catch {
+      esquecerSessaoSalva(); // servidor reiniciou ou sessão encerrada: começa do zero
+      return null;
+    }
+    this.id = salvo.id;
+    this.api = salvo.api || "";
+    this.mensagens = [];
+    this.turno = null;
+    this._emitir({ tipo: "sessao" });
+    this._emitir({ tipo: "estado", state: estado });
+    this._abrirSse(); // o SSE reenvia o histórico: bolhas e eventos voltam sozinhos
+    return this.id;
+  },
+
+  async garantirSessao() {
+    if (this._retomando) await this._retomando;
+    if (this.id) return this.id;
+    return this.novaSessao();
+  },
+
+  async novaSessao() {
+    if (this._criando) return this._criando; // duplo clique / duas telas pedindo junto
+    this._criando = this._criar().finally(() => {
+      this._criando = null;
+    });
+    return this._criando;
+  },
+
+  async _criar() {
+    const anterior = this.id;
+    this._fecharSse();
+    this.id = null;
+    const body = this.apiEscolhida ? { api: this.apiEscolhida } : {};
+    let data;
+    try {
+      data = await api("/api/lab/sessions", { method: "POST", body });
+    } catch (err) {
+      this._emitir({ tipo: "indisponivel", mensagem: err.message });
+      throw err;
+    }
+    if (anterior) api(`/api/lab/sessions/${encodeURIComponent(anterior)}`, { method: "DELETE" }).catch(() => {});
+    this.id = data.id;
+    this.api = data.api || "";
+    this.mensagens = [];
+    this.turno = null;
+    guardarSessao(this.id, this.api);
+    this._emitir({ tipo: "sessao" });
+    this._abrirSse();
+    return this.id;
+  },
+
+  /** A API de cotação é fixada na criação da sessão — trocá-la de verdade exige sessão nova. */
   async trocarApi(url) {
     const novo = (url || "").trim();
-    if (novo === this.apiEscolhida) return;
+    if (novo === (this.id ? this.api : this.apiEscolhida)) {
+      this.apiEscolhida = novo; // já é a URL em uso: nada a recriar
+      return;
+    }
     this.apiEscolhida = novo;
     this._emitir({ tipo: "api" });
     if (!this.id) return;
@@ -910,54 +986,25 @@ const LabSession = {
     }
   },
 
-  async garantirSessao() {
-    if (this.id) return this.id;
-    if (!this._criando) {
-      this._criando = this._criar().finally(() => {
-        this._criando = null;
-      });
-    }
-    return this._criando;
-  },
-
-  async novaSessao() {
-    this.encerrar();
-    return this.garantirSessao();
-  },
-
-  async _criar() {
-    const body = this.apiEscolhida ? { api: this.apiEscolhida } : {};
-    let data;
-    try {
-      data = await api("/api/lab/sessions", { method: "POST", body });
-    } catch (err) {
-      this._emitir({ tipo: "indisponivel", mensagem: err.message });
-      throw err;
-    }
-    this.id = data.id;
-    this.api = data.api || "";
-    this.mensagens = [];
-    this._emitir({ tipo: "sessao" });
+  _abrirSse() {
     this.es = sse(`/api/lab/sessions/${this.id}/events`, (ev) => this._onEvento(ev));
-    return this.id;
   },
 
-  _onEvento(ev) {
-    if (ev.event === "inbound") {
-      this.mensagens.push({ lado: "lead", texto: ev.data.text || `(mídia: ${ev.data.media_type})`, turno: ev.message_id });
-    } else if (ev.event === "outbound") {
-      this.mensagens.push({ lado: "agent", texto: ev.data.text, source: ev.data.source });
-    }
-    this._emitir({ tipo: "evento", ev });
-  },
-
-  encerrar() {
+  _fecharSse() {
     if (this.es) {
       this.es.close();
       this.es = null;
     }
-    this.id = null;
-    this.mensagens = [];
+  },
+
+  _onEvento(ev) {
+    if (ev.event === "inbound") {
+      this.turno = ev.message_id;
+      this.mensagens.push({ lado: "lead", texto: ev.data.text || `(mídia: ${ev.data.media_type})`, turno: this.turno });
+    } else if (ev.event === "outbound") {
+      this.mensagens.push({ lado: "agent", texto: ev.data.text, source: ev.data.source, turno: this.turno });
+    }
+    this._emitir({ tipo: "evento", ev });
   },
 
   async enviar(body) {
@@ -973,108 +1020,240 @@ const LabSession = {
   },
 };
 
+// `sessionStorage` pode lançar (modo privado, cookies bloqueados): nunca deixa o boot cair
+function lerSessaoSalva() {
+  try {
+    const salvo = JSON.parse(sessionStorage.getItem(SESSAO_KEY) || "null");
+    return salvo && salvo.id ? salvo : null;
+  } catch {
+    return null;
+  }
+}
+
+function guardarSessao(id, apiUrl) {
+  try {
+    sessionStorage.setItem(SESSAO_KEY, JSON.stringify({ id, api: apiUrl }));
+  } catch {
+    /* sem storage: a sessão só não sobrevive ao reload */
+  }
+}
+
+function esquecerSessaoSalva() {
+  try {
+    sessionStorage.removeItem(SESSAO_KEY);
+  } catch {
+    /* idem */
+  }
+}
+
+// -------------------------------------------------------------------------- componente de chat
+// Mesmo markup (`<template id="tpl-chat">`) e mesmo comportamento no Lab e no "Testar prompt":
+// bolhas + barra de API/modelo + composer. As diferenças vêm por `opts`.
+function criarChat(container, opts) {
+  container.appendChild(el("tpl-chat").content.cloneNode(true));
+  const q = (sel) => container.querySelector(sel);
+  const scroll = q(".chat-scroll");
+  const vazio = q(".empty-state");
+  const aviso = q(".chat-unavailable");
+  const input = q(".chat-input");
+  const typing = q(".chat-typing");
+  const select = q(".chat-api");
+  const custom = q(".chat-api-custom");
+
+  q(".empty-1").textContent = opts.vazio1;
+  q(".empty-2").textContent = opts.vazio2;
+  input.placeholder = opts.placeholder;
+
+  const chat = {
+    turnoSelecionado: null,
+
+    render() {
+      scroll.innerHTML = "";
+      for (const m of LabSession.mensagens) {
+        const bolha = document.createElement("div");
+        bolha.className = "bubble " + (m.lado === "lead" ? "bubble-lead" : "bubble-agent");
+        bolha.textContent = m.texto;
+        if (m.turno) bolha.dataset.turno = m.turno;
+        if (m.lado === "agent" && m.source) {
+          const src = document.createElement("span");
+          src.className = "src";
+          src.textContent = m.source;
+          bolha.appendChild(src);
+        }
+        if (opts.aoSelecionarTurno && m.turno) {
+          bolha.classList.add("clicavel");
+          bolha.classList.toggle("selected", m.turno === chat.turnoSelecionado);
+          bolha.addEventListener("click", () => opts.aoSelecionarTurno(m.turno));
+        }
+        scroll.appendChild(bolha);
+      }
+      const tem = LabSession.mensagens.length > 0;
+      scroll.hidden = !tem;
+      vazio.hidden = tem;
+      scroll.scrollTop = scroll.scrollHeight;
+    },
+
+    marcarTurno(id) {
+      chat.turnoSelecionado = id;
+      scroll.querySelectorAll(".bubble").forEach((b) => b.classList.toggle("selected", b.dataset.turno === id));
+    },
+
+    focar() {
+      input.focus();
+    },
+
+    /** URL de cotação a mostrar: a EFETIVA da sessão; sem sessão, a escolhida. */
+    urlAtual() {
+      return (LabSession.id ? LabSession.api : LabSession.apiEscolhida) || "";
+    },
+
+    preencherControles() {
+      const opcoes = ['<option value="">API padrão do agente</option>'];
+      for (const [rotulo, url] of Object.entries(LabSession.endpoints)) {
+        opcoes.push(`<option value="${escapeHtml(url)}">${escapeHtml(rotulo)}</option>`);
+      }
+      opcoes.push('<option value="__livre">URL livre…</option>');
+      select.innerHTML = opcoes.join("");
+      chat.refletirApi();
+      q(".chat-gemini").textContent = `Gemini · ${LabSession.geminiModel || "—"}`;
+    },
+
+    refletirApi() {
+      const url = chat.urlAtual();
+      const conhecida = Array.from(select.options).some((o) => o.value === url);
+      select.value = conhecida ? url : "__livre";
+      custom.hidden = conhecida;
+      if (!conhecida) custom.value = url;
+    },
+
+    onSessao(msg) {
+      if (msg.tipo === "efetivo") chat.preencherControles();
+      else if (msg.tipo === "api") chat.refletirApi();
+      else if (msg.tipo === "sessao") {
+        aviso.hidden = true;
+        chat.turnoSelecionado = null;
+        chat.refletirApi();
+        chat.render();
+      } else if (msg.tipo === "evento") {
+        if (msg.ev.event === "inbound" || msg.ev.event === "outbound") chat.render();
+      } else if (msg.tipo === "enviando") typing.hidden = !msg.ativo;
+      else if (msg.tipo === "indisponivel") {
+        aviso.hidden = false;
+        aviso.textContent = `Lab indisponível: ${msg.mensagem}`;
+      }
+    },
+
+    async enviarTexto() {
+      const texto = input.value.trim();
+      if (!texto) return;
+      input.value = "";
+      await guarded(() => LabSession.enviar({ text: texto }))();
+    },
+  };
+
+  q(".chat-send").addEventListener("click", () => chat.enviarTexto());
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") chat.enviarTexto();
+  });
+  q(".chat-clear").addEventListener("click", () => {
+    input.value = "";
+    input.focus();
+  });
+  q(".chat-gemini").addEventListener("click", () => {
+    location.hash = "#config";
+  });
+  select.addEventListener("change", () => {
+    const livre = select.value === "__livre";
+    custom.hidden = !livre;
+    if (livre) custom.focus();
+    else guarded(() => LabSession.trocarApi(select.value))();
+  });
+  custom.addEventListener("change", () => guarded(() => LabSession.trocarApi(custom.value))());
+  if (opts.microfone) {
+    const mic = q(".chat-mic");
+    mic.hidden = false;
+    mic.addEventListener("click", () => guarded(() => LabSession.enviar({ media_type: "audio" }))());
+  }
+
+  LabSession.subscribe((msg) => chat.onSessao(msg));
+  return chat;
+}
+
 // -------------------------------------------------------------------------- aba Lab
+const PAINEIS = ["eventos", "contexto", "estado"];
+
 const Lab = {
+  chat: null,
   turnos: new Map(), // message_id do inbound -> { inbound, events: [] }
   turnoAtual: null,
   turnoSelecionado: null,
 
   init() {
+    this.chat = criarChat(el("lab-chat"), {
+      placeholder: "Converse com o agente…",
+      vazio1: "Converse com o agente enviando uma mensagem.",
+      vazio2: "Cada turno abre à direita: eventos ao vivo, contexto do LLM e estado do lead.",
+      microfone: true,
+      aoSelecionarTurno: (id) => this.selecionarTurno(id),
+    });
+
     const btnNova = el("lab-new-session");
-    btnNova.addEventListener(
-      "click",
-      withLoading(btnNova, () => {
-        LabSession.apiEscolhida = el("lab-api-custom").value.trim();
-        return LabSession.novaSessao();
-      })
-    );
-    el("lab-api-select").addEventListener("change", (e) => {
-      if (e.target.value) el("lab-api-custom").value = e.target.value;
+    btnNova.addEventListener("click", withLoading(btnNova, () => LabSession.novaSessao()));
+    el("lab-copy-id").addEventListener("click", () => this.copiarId());
+    document.querySelectorAll("#lab-side-tabs button").forEach((b) => {
+      b.addEventListener("click", () => this.mostrarPainel(b.dataset.pane));
     });
-    el("lab-send").addEventListener("click", () => this.enviar());
-    el("lab-input").addEventListener("keydown", (e) => {
-      if (e.key === "Enter") this.enviar();
-    });
-    el("lab-audio").addEventListener("click", () => this.enviarAudio());
     LabSession.subscribe((msg) => this.onSessao(msg));
   },
 
-  onSessao(msg) {
-    if (msg.tipo === "efetivo") this.preencherSelect();
-    else if (msg.tipo === "api") el("lab-api-custom").value = LabSession.apiEscolhida;
-    else if (msg.tipo === "sessao") this.aoAbrirSessao();
-    else if (msg.tipo === "evento") this.onEvento(msg.ev);
-    else if (msg.tipo === "estado") el("lab-state-json").textContent = JSON.stringify(msg.state, null, 2);
-    else if (msg.tipo === "enviando") el("lab-typing").hidden = !msg.ativo;
-    else if (msg.tipo === "indisponivel") {
-      const aviso = el("lab-unavailable");
-      aviso.hidden = false;
-      aviso.textContent = `Lab indisponível: ${msg.mensagem}`;
+  mostrarPainel(nome) {
+    for (const p of PAINEIS) el(`lab-pane-${p}`).hidden = p !== nome;
+    document.querySelectorAll("#lab-side-tabs button").forEach((b) => b.classList.toggle("active", b.dataset.pane === nome));
+  },
+
+  async copiarId() {
+    if (!LabSession.id) return;
+    try {
+      await navigator.clipboard.writeText(LabSession.id);
+      toast("id da sessão copiado", "success");
+    } catch {
+      toast("não consegui copiar o id", "error");
     }
   },
 
-  preencherSelect() {
-    el("lab-api-select").innerHTML =
-      '<option value="">(usar URL livre)</option>' +
-      Object.entries(LabSession.endpoints)
-        .map(([label, url]) => `<option value="${escapeHtml(url)}">${escapeHtml(label)} — ${escapeHtml(url)}</option>`)
-        .join("");
+  onSessao(msg) {
+    if (msg.tipo === "sessao") this.aoAbrirSessao();
+    else if (msg.tipo === "evento") this.onEvento(msg.ev);
+    else if (msg.tipo === "estado") el("lab-state-json").textContent = JSON.stringify(msg.state, null, 2);
   },
 
   aoAbrirSessao() {
     this.turnos.clear();
     this.turnoAtual = null;
     this.turnoSelecionado = null;
-    el("lab-unavailable").hidden = true;
-    el("lab-session-id").textContent = `sessão ${LabSession.id} · ${LabSession.api || "(padrão)"}`;
+    el("lab-session-id").textContent = LabSession.id;
+    el("lab-copy-id").disabled = false;
     Breadcrumb.set("lab", String(LabSession.id).slice(0, 8));
-    el("lab-messages").innerHTML = "";
     el("lab-events-list").innerHTML = "";
     el("lab-context-body").innerHTML = '<p class="muted">Selecione um turno (bolha do lead) para ver o contexto.</p>';
     el("lab-state-json").textContent = "(sem turnos ainda)";
-    el("lab-input").disabled = false;
-    el("lab-send").disabled = false;
-    el("lab-audio").disabled = false;
   },
 
   onEvento(ev) {
     if (ev.event === "inbound") {
       this.turnoAtual = ev.message_id;
       this.turnos.set(this.turnoAtual, { inbound: ev, events: [] });
-      this.renderBubbleLead(ev);
-    } else {
-      if (this.turnoAtual && this.turnos.has(this.turnoAtual)) this.turnos.get(this.turnoAtual).events.push(ev);
-      if (ev.event === "outbound") this.renderBubbleAgent(ev);
+    } else if (this.turnoAtual && this.turnos.has(this.turnoAtual)) {
+      this.turnos.get(this.turnoAtual).events.push(ev);
     }
     this.renderEventRow(ev);
     if (this.turnoSelecionado && this.turnoSelecionado === this.turnoAtual) this.renderContexto();
   },
 
-  renderBubbleLead(ev) {
-    const bolha = document.createElement("div");
-    bolha.className = "bubble bubble-lead";
-    bolha.dataset.turno = ev.message_id;
-    bolha.textContent = ev.data.text || `(mídia: ${ev.data.media_type})`;
-    bolha.addEventListener("click", () => this.selecionarTurno(ev.message_id));
-    const box = el("lab-messages");
-    box.appendChild(bolha);
-    box.scrollTop = box.scrollHeight;
-  },
-
-  renderBubbleAgent(ev) {
-    const bolha = document.createElement("div");
-    bolha.className = "bubble bubble-agent";
-    bolha.dataset.turno = this.turnoAtual || "";
-    bolha.innerHTML = `${escapeHtml(ev.data.text)}<span class="src">${escapeHtml(ev.data.source || "")}</span>`;
-    if (this.turnoAtual) bolha.addEventListener("click", () => this.selecionarTurno(this.turnoAtual));
-    const box = el("lab-messages");
-    box.appendChild(bolha);
-    box.scrollTop = box.scrollHeight;
-  },
-
   selecionarTurno(id) {
     this.turnoSelecionado = id;
-    document.querySelectorAll("#lab-messages .bubble").forEach((b) => b.classList.toggle("selected", b.dataset.turno === id));
+    this.chat.marcarTurno(id);
+    this.mostrarPainel("contexto");
     this.renderContexto();
   },
 
@@ -1133,47 +1312,24 @@ const Lab = {
       })
       .join("");
   },
-
-  async enviar() {
-    const input = el("lab-input");
-    const texto = input.value.trim();
-    if (!texto) return;
-    input.value = "";
-    await guarded(() => LabSession.enviar({ text: texto }))();
-  },
-
-  async enviarAudio() {
-    await guarded(() => LabSession.enviar({ media_type: "audio" }))();
-  },
 };
 
 // -------------------------------------------------------------------------- "Testar prompt" (aba Prompts)
-// Mesmo motor e MESMA sessão do Lab: só o chat aparece aqui — eventos e contexto continuam
+// Mesmo componente de chat do Lab e MESMA sessão: aqui só o chat: eventos e contexto continuam
 // sendo assunto da aba Lab (link "ver eventos no Lab").
 const TestPanel = {
+  chat: null,
+
   init() {
+    this.chat = criarChat(el("test-body"), {
+      placeholder: "Envie uma mensagem para testar o prompt…",
+      vazio1: "Teste o agente enviando uma mensagem.",
+      vazio2: "O agente usa a versão ATIVA de cada slot — ative a versão para testá-la.",
+    });
     el("test-toggle").addEventListener("click", () => this.alternar());
-    el("test-send").addEventListener("click", () => this.enviar());
-    el("test-input").addEventListener("keydown", (e) => {
-      if (e.key === "Enter") this.enviar();
+    LabSession.subscribe((msg) => {
+      if (msg.tipo === "sessao") el("test-ver-eventos").hidden = false;
     });
-    el("test-clear").addEventListener("click", () => {
-      const input = el("test-input");
-      input.value = "";
-      input.focus();
-    });
-    el("test-gemini").addEventListener("click", () => {
-      location.hash = "#config";
-    });
-    el("test-api").addEventListener("change", () => {
-      const valor = el("test-api").value;
-      const livre = valor === "__livre";
-      el("test-api-custom").hidden = !livre;
-      if (livre) el("test-api-custom").focus();
-      else guarded(() => LabSession.trocarApi(valor))();
-    });
-    el("test-api-custom").addEventListener("change", () => guarded(() => LabSession.trocarApi(el("test-api-custom").value))());
-    LabSession.subscribe((msg) => this.onSessao(msg));
   },
 
   async alternar() {
@@ -1184,75 +1340,9 @@ const TestPanel = {
     botao.setAttribute("aria-expanded", String(abrindo));
     botao.classList.toggle("aberto", abrindo);
     if (!abrindo) return;
-    this.renderMensagens();
+    this.chat.render();
     if (!LabSession.id) await guarded(() => LabSession.garantirSessao())();
-    el("test-input").focus();
-  },
-
-  onSessao(msg) {
-    if (msg.tipo === "efetivo") this.preencherControles();
-    else if (msg.tipo === "api") this.refletirApi();
-    else if (msg.tipo === "sessao") {
-      el("test-unavailable").hidden = true;
-      el("test-ver-eventos").hidden = false;
-      this.renderMensagens();
-    } else if (msg.tipo === "evento") {
-      if (msg.ev.event === "inbound" || msg.ev.event === "outbound") this.renderMensagens();
-    } else if (msg.tipo === "enviando") el("test-typing").hidden = !msg.ativo;
-    else if (msg.tipo === "indisponivel") {
-      const aviso = el("test-unavailable");
-      aviso.hidden = false;
-      aviso.textContent = `Lab indisponível: ${msg.mensagem}`;
-    }
-  },
-
-  preencherControles() {
-    const opcoes = ['<option value="">API padrão do agente</option>'];
-    for (const [rotulo, url] of Object.entries(LabSession.endpoints)) {
-      opcoes.push(`<option value="${escapeHtml(url)}">${escapeHtml(rotulo)}</option>`);
-    }
-    opcoes.push('<option value="__livre">URL livre…</option>');
-    el("test-api").innerHTML = opcoes.join("");
-    this.refletirApi();
-    el("test-gemini").textContent = `Gemini · ${LabSession.geminiModel || "—"}`;
-  },
-
-  refletirApi() {
-    const select = el("test-api");
-    const url = LabSession.apiEscolhida || "";
-    const conhecida = Array.from(select.options).some((o) => o.value === url);
-    select.value = conhecida ? url : "__livre";
-    el("test-api-custom").hidden = conhecida;
-    if (!conhecida) el("test-api-custom").value = url;
-  },
-
-  renderMensagens() {
-    const box = el("test-messages");
-    const msgs = LabSession.mensagens;
-    box.innerHTML = "";
-    for (const m of msgs) {
-      const bolha = document.createElement("div");
-      bolha.className = "bubble " + (m.lado === "lead" ? "bubble-lead" : "bubble-agent");
-      bolha.textContent = m.texto;
-      if (m.lado === "agent" && m.source) {
-        const src = document.createElement("span");
-        src.className = "src";
-        src.textContent = m.source;
-        bolha.appendChild(src);
-      }
-      box.appendChild(bolha);
-    }
-    box.hidden = msgs.length === 0;
-    el("test-empty").hidden = msgs.length > 0;
-    box.scrollTop = box.scrollHeight;
-  },
-
-  async enviar() {
-    const input = el("test-input");
-    const texto = input.value.trim();
-    if (!texto) return;
-    input.value = "";
-    await guarded(() => LabSession.enviar({ text: texto }))();
+    this.chat.focar();
   },
 };
 
@@ -1288,5 +1378,6 @@ document.addEventListener("DOMContentLoaded", () => {
   TestPanel.init();
   atalhos();
   LabSession.carregarEfetivo().catch((err) => toast(err.message, "error"));
+  LabSession.iniciar(); // retoma a sessão desta aba, se ainda existir no servidor
   renderTab();
 });
