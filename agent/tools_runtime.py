@@ -39,7 +39,6 @@ from agent.config import ROOT
 from agent.runtime_config import (
     ENV_REF_RE,
     SQL_PARAM_RE,
-    ConfigError,
     ConfigStore,
     CustomTool,
 )
@@ -295,12 +294,7 @@ def carregar_tools(store: ConfigStore, emitir: Any = None, client: Any = None) -
     `emitir(evento)` é chamado depois de cada execução; é por ele que o `tool_call` chega ao log
     do turno. Sem ele (botão "Testar" do Studio), a execução não gera evento nenhum.
     """
-    try:
-        registro = store.custom_tools()
-    except ConfigError as exc:
-        log.error("custom_tools.json inválido (%s): o agente segue sem tools", exc)
-        return []
-    habilitadas = [t for t in registro.tools.values() if t.enabled]
+    habilitadas = store.custom_tools_habilitadas()
     if not habilitadas:
         return []
     from agno.tools.function import Function

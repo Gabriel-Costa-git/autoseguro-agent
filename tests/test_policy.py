@@ -7,6 +7,7 @@ import pytest
 
 from agent.config import settings
 from agent.models import (
+    AnswerWithTools,
     AskField,
     AskPlan,
     CepInfo,
@@ -31,7 +32,7 @@ from agent.models import (
     Stage,
     Violation,
 )
-from agent.policy import TXT_INSTABILIDADE, TXT_MIDIA, next_action
+from agent.policy import DIRETIVA_POS_COTACAO, TXT_INSTABILIDADE, TXT_MIDIA, next_action
 from agent.runtime_config import ConfigStore
 
 HOJE = date(2026, 9, 1)
@@ -671,3 +672,70 @@ def test_com_pre_validacao_local_o_comportamento_entregue_continua(store_tmp):
     s, acoes = _act(_state(stage=Stage.COLETA_IDADE), _extr(idade=80))
     assert isinstance(acoes[0], Refuse)
     assert s.stage is Stage.ENCERRADO_RECUSA
+
+
+# --------------------------------------------------------------------------- consulta com ferramenta
+# `Intent.CONSULTA` só chega à policy quando há tool habilitada (a `Conversation` normaliza para
+# `outro` quando não há) — aqui se testa o que a policy faz com ele.
+def test_consulta_responde_com_ferramenta_e_retoma_a_coleta():
+    s, acoes = _act(_state(stage=Stage.COLETA_IDADE), _extr(intent=Intent.CONSULTA))
+
+    assert len(acoes) == 1
+    assert isinstance(acoes[0], AnswerWithTools)
+    assert acoes[0].kind == "answer_with_tools"
+    assert "ferramenta" in acoes[0].directive
+    assert "pergunte a idade do condutor principal" in acoes[0].directive   # {proxima}
+    assert s.stage is Stage.COLETA_IDADE          # a etapa da venda não anda por causa da dúvida
+    assert s.ultima_pergunta == "idade"           # mas a pergunta vai junto, e o extractor precisa saber
+
+
+def test_consulta_aplica_os_campos_da_mesma_mensagem_antes():
+    """"quero cotar, tenho 35 anos, e minha apólice está ativa?" — a idade não se perde."""
+    s, acoes = _act(_state(stage=Stage.COLETA_IDADE), _extr(intent=Intent.CONSULTA, idade=35))
+
+    assert s.idade == 35
+    assert isinstance(acoes[0], AnswerWithTools)
+    assert "pergunte o modelo e o ano de fabricação do carro" in acoes[0].directive  # próxima do roteiro
+    assert s.ultima_pergunta == "veiculo"
+
+
+def test_consulta_nao_conta_como_turno_sem_progresso():
+    s, _ = _act(_state(stage=Stage.COLETA_IDADE, turnos_sem_progresso=2), _extr(intent=Intent.CONSULTA))
+    assert s.turnos_sem_progresso == 0
+    assert s.stage is Stage.COLETA_IDADE          # não escalou para humano
+
+
+def test_consulta_com_pendencia_vira_a_proxima_pergunta():
+    """Ano-modelo pendente + dúvida: responde a dúvida e emenda a correção pendente."""
+    s, acoes = _act(_state(idade=35), _extr(intent=Intent.CONSULTA, veiculo_ano=2027))
+    assert isinstance(acoes[0], AnswerWithTools)
+    assert "pergunte o modelo e o ano de fabricação do carro" in acoes[0].directive
+    assert s.veiculo_ano is None                  # o ano suspeito continua não sendo gravado
+
+
+def test_consulta_depois_da_cotacao_usa_a_diretiva_pos_cotacao():
+    estado = _completo(stage=Stage.APRESENTADO, quote_result=_result())
+    s, acoes = _act(estado, _extr(intent=Intent.CONSULTA))
+    assert isinstance(acoes[0], AnswerWithTools)
+    assert DIRETIVA_POS_COTACAO in acoes[0].directive
+    assert s.stage is Stage.APRESENTADO
+
+
+def test_consulta_em_estado_terminal_continua_encerrada():
+    s, acoes = _act(_state(stage=Stage.HANDOFF), _extr(intent=Intent.CONSULTA))
+    assert isinstance(acoes[0], SendText)
+    assert s.stage is Stage.HANDOFF
+
+
+def test_fora_de_escopo_continua_indo_para_humano():
+    """A consulta não roubou o `fora_de_escopo`: o que nenhuma ferramenta resolve ainda escala."""
+    s, acoes = _act(_state(idade=35), _extr(intent=Intent.FORA_DE_ESCOPO))
+    assert isinstance(acoes[0], Handoff)
+    assert s.handoff_reason is HandoffReason.FORA_DE_ESCOPO
+
+
+def test_diretiva_de_consulta_vem_do_slot(store_tmp):
+    store_tmp.add_version("responder.diretiva_consulta", "v2", "consulte a ferramenta e depois: {proxima}")
+    _, acoes = _act(_state(stage=Stage.COLETA_IDADE), _extr(intent=Intent.CONSULTA))
+    assert acoes[0].directive == "consulte a ferramenta e depois: pergunte a idade do condutor principal"
+

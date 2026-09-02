@@ -904,6 +904,36 @@
           "created_at": "2026-09-02T17:32:36+00:00"
         }
       }
+    },
+    "intent.consulta": {
+      "label": "Exemplos do intent consulta",
+      "grupo": "extractor",
+      "placeholders": [
+        "ferramentas"
+      ],
+      "active": "default",
+      "versions": {
+        "default": {
+          "text": "pergunta do lead que UMA DESTAS ferramentas do consultor responde (só use este intent nesse caso):\n{ferramentas}",
+          "note": "comportamento entregue",
+          "created_at": "2026-09-02T23:27:36+00:00"
+        }
+      }
+    },
+    "responder.diretiva_consulta": {
+      "label": "Diretiva ao Responder: consulta com ferramenta",
+      "grupo": "responder",
+      "placeholders": [
+        "proxima"
+      ],
+      "active": "default",
+      "versions": {
+        "default": {
+          "text": "O lead fez uma pergunta que uma das suas ferramentas responde. Use a ferramenta adequada, responda em até 2 frases sem inventar nada além do que ela devolveu, e em seguida retome a coleta: {proxima}",
+          "note": "comportamento entregue",
+          "created_at": "2026-09-02T23:27:36+00:00"
+        }
+      }
     }
   }
 }

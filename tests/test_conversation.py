@@ -14,6 +14,7 @@ import pytest
 from agent import cep as cep_mod
 from agent.conversation import TEXTO_ERRO, TEXTO_LENTO, Conversation, InMemoryStateStore
 from agent.models import (
+    AnswerWithTools,
     AskField,
     AskPlan,
     CepInfo,
@@ -602,3 +603,94 @@ async def test_texto_de_erro_vem_do_slot_ativo(tmp_path, monkeypatch):
     state, saidas = await falar(conv, "oi", 1)
     assert saidas[0].text == "Deu ruim aqui; já chamei alguém."
     assert state.stage is Stage.HANDOFF
+
+
+# --------------------------------------------------------------------------- consulta com ferramenta
+TOOL_APOLICE = {
+    "tipo": "http",
+    "descricao": "Consulta a apólice do cliente pelo CPF.",
+    "parametros": {"cpf": {"tipo": "string", "obrigatorio": True}},
+    "http": {"metodo": "GET", "url": "https://api.exemplo.test/apolices/{cpf}"},
+}
+
+
+def _com_tool(tmp_path, monkeypatch, ligada: bool = True) -> ConfigStore:
+    """Store isolado no lugar do singleton do conversation, com (ou sem) uma tool habilitada."""
+    loja = _config(tmp_path, monkeypatch)
+    if ligada:
+        loja.upsert_custom_tool("consulta_apolice", TOOL_APOLICE)
+    return loja
+
+
+@pytest.mark.asyncio
+async def test_consulta_sem_tool_habilitada_vira_outro(tmp_path, monkeypatch):
+    """O valor está no schema do `Extraction`: o modelo pode escolhê-lo mesmo sem ferramenta."""
+    _com_tool(tmp_path, monkeypatch, ligada=False)
+    conv, deps = montar(
+        tmp_path, [lambda s, e: (s, [])], extracoes=[Extraction(intent=Intent.CONSULTA, idade=35)]
+    )
+    await falar(conv, "minha apólice está ativa?", 1)
+
+    assert deps["policy"].chamadas[0].intent is Intent.OUTRO       # a policy nem vê `consulta`
+    evento = next(e for e in deps["logger"].eventos() if e["event"] == "extraction")
+    assert evento["data"]["intent"] == "outro"
+    assert evento["data"]["intent_bruto"] == "consulta"            # o sinal do modelo não some
+    assert evento["data"]["idade"] == 35                           # o resto da extração fica igual
+
+
+@pytest.mark.asyncio
+async def test_consulta_com_tool_habilitada_chega_na_policy(tmp_path, monkeypatch):
+    _com_tool(tmp_path, monkeypatch)
+    conv, deps = montar(
+        tmp_path, [lambda s, e: (s, [])], extracoes=[Extraction(intent=Intent.CONSULTA, idade=35)]
+    )
+    await falar(conv, "minha apólice está ativa?", 1)
+
+    assert deps["policy"].chamadas[0].intent is Intent.CONSULTA
+    evento = next(e for e in deps["logger"].eventos() if e["event"] == "extraction")
+    assert evento["data"]["intent"] == "consulta"
+    assert "intent_bruto" not in evento["data"]
+
+
+@pytest.mark.asyncio
+async def test_answer_with_tools_passa_pelo_responder_e_entra_no_log(tmp_path, monkeypatch):
+    _com_tool(tmp_path, monkeypatch)
+
+    def p1(s, e):
+        return s, [AnswerWithTools(directive="use a ferramenta e retome: pergunte a idade")]
+
+    conv, deps = montar(tmp_path, [p1], extracoes=[Extraction(intent=Intent.CONSULTA)])
+    _, saidas = await falar(conv, "minha apólice está ativa?", 1)
+
+    assert deps["responder"].chamadas == [("use a ferramenta e retome: pergunte a idade", "minha apólice está ativa?")]
+    assert saidas[0].source == "llm"
+    decisao = next(e for e in deps["logger"].eventos() if e["event"] == "decision")
+    assert decisao["data"]["actions"] == ["answer_with_tools"]
+
+
+@pytest.mark.asyncio
+async def test_turno_de_consulta_ponta_a_ponta_com_a_policy_real(tmp_path, monkeypatch):
+    """Extração `consulta` + tool ligada ⇒ a policy real decide `answer_with_tools`."""
+    _com_tool(tmp_path, monkeypatch)
+    monkeypatch.setattr("agent.policy.store", ConfigStore(tmp_path / "cfg"))
+    logger = FakeLogger(tmp_path, "c-teste")
+    conv = Conversation(
+        rules=Rules.from_planos(PLANOS, HOJE),
+        quote_client=FakeQuoteClient([]),
+        extractor=FakeExtractor([Extraction(intent=Intent.CONSULTA, idade=35)]),
+        responder=FakeResponder("Sua apólice está ativa. Qual o ano do carro?"),
+        log_dir=tmp_path,
+        store=InMemoryStateStore(),
+        today=lambda: HOJE,
+        render=render_fake,
+        logger_factory=logger_factory_unico(logger),
+    )
+    state, saidas = await falar(conv, "tenho 35 anos. minha apólice do cpf 12345678901 está ativa?", 1)
+
+    assert state.idade == 35                       # o campo da mesma mensagem foi aplicado
+    assert state.stage is Stage.INICIO             # a etapa não andou por causa da dúvida
+    assert state.ultima_pergunta == "veiculo"      # mas a próxima pergunta foi feita
+    assert saidas[0].text == "Sua apólice está ativa. Qual o ano do carro?"
+    decisao = next(e for e in logger.eventos() if e["event"] == "decision")
+    assert decisao["data"]["actions"] == ["answer_with_tools"]
+

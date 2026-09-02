@@ -210,9 +210,28 @@ def _historico_do_run(run: Any) -> list[dict[str, Any]]:
 
 
 # --------------------------------------------------------------------------- prompts
-def _intent_exemplos() -> dict[Intent, str]:
-    """Exemplos por intent, na ordem do enum (slots `intent.<valor>`)."""
-    return {i: store.text(f"intent.{i.value}") for i in Intent}
+def lista_de_ferramentas(tools: list[Any]) -> str:
+    """`- nome: descrição` de cada tool habilitada, para o prompt do Extractor."""
+    return "\n".join(f"  - {t.nome}: {t.descricao}" for t in tools)
+
+
+def _intent_exemplos(ferramentas: list[Any] | None = None) -> dict[Intent, str]:
+    """Exemplos por intent, na ordem do enum (slots `intent.<valor>`).
+
+    `consulta` só existe quando há tool habilitada: sem tool, o intent nem aparece no prompt
+    (o prompt do Extractor fica byte-idêntico ao entregue) e a `Conversation` normaliza para
+    `outro` se o modelo escolher o valor mesmo assim — ele está no schema do `Extraction`.
+    `ferramentas=[]` força o caso "entregue" (é o que os goldens usam).
+    """
+    tools = store.custom_tools_habilitadas() if ferramentas is None else ferramentas
+    exemplos: dict[Intent, str] = {}
+    for i in Intent:
+        if i is Intent.CONSULTA:
+            if tools:
+                exemplos[i] = store.text("intent.consulta", ferramentas=lista_de_ferramentas(tools))
+            continue
+        exemplos[i] = store.text(f"intent.{i.value}")
+    return exemplos
 
 
 def directive_for_field(campo: CampoColeta, motivo: str | None = None) -> str:
@@ -238,9 +257,15 @@ def resumo_state(state: LeadState) -> str:
     return "; ".join(partes)
 
 
-def build_extraction_instructions(state: LeadState, today: date) -> str:
-    """Prompt do Extractor (slot `extractor.instructions`): data, estado, última pergunta, intents."""
-    intents = "\n".join(f"- {i.value}: {ex}" for i, ex in _intent_exemplos().items())
+def build_extraction_instructions(
+    state: LeadState, today: date, ferramentas: list[Any] | None = None
+) -> str:
+    """Prompt do Extractor (slot `extractor.instructions`): data, estado, última pergunta, intents.
+
+    `ferramentas` é ponto de injeção: `None` = lê as tools habilitadas do store (produção),
+    `[]` = comportamento entregue, sem o intent `consulta`.
+    """
+    intents = "\n".join(f"- {i.value}: {ex}" for i, ex in _intent_exemplos(ferramentas).items())
     return store.text(
         "extractor.instructions",
         today=today.isoformat(),

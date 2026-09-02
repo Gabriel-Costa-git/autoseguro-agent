@@ -77,8 +77,13 @@ def casos() -> dict[str, str]:
         cep_info=CepInfo(cep="01310100", existe=True, cidade="São Paulo", uf="SP"),
         stage=Stage.ESCOLHA_PLANO, ultima_pergunta="plano",
     )
-    out["brain_extractor_instructions"] = brain.build_extraction_instructions(st_ext, HOJE)
-    out["brain_extractor_instructions_vazio"] = brain.build_extraction_instructions(LeadState(conversation_id="g"), HOJE)
+    # `ferramentas=[]` = a configuração ENTREGUE (nenhuma tool no painel). Sem isso o golden
+    # dependeria do `config/custom_tools.json` da máquina: uma tool ligada acrescenta o intent
+    # `consulta` ao prompt DE PROPÓSITO, e o gate ficaria vermelho por causa de configuração.
+    out["brain_extractor_instructions"] = brain.build_extraction_instructions(st_ext, HOJE, ferramentas=[])
+    out["brain_extractor_instructions_vazio"] = brain.build_extraction_instructions(
+        LeadState(conversation_id="g"), HOJE, ferramentas=[]
+    )
     out["brain_responder_instructions"] = brain.build_responder_instructions(st, "peça o CEP")
     out["brain_responder_instructions_apresentado"] = brain.build_responder_instructions(st, policy.DIRETIVA_OBJECAO)
     out["brain_directive_for_field"] = "\n".join(

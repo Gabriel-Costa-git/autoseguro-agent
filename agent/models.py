@@ -67,6 +67,7 @@ class Intent(StrEnum):
     PEDIR_HUMANO = "pedir_humano"
     OBJECAO_PRECO = "objecao_preco"  # "tá caro", "vi mais barato"
     PEDIR_DESCONTO = "pedir_desconto"  # pede desconto/condição explicitamente → humano
+    CONSULTA = "consulta"              # pergunta que uma tool do painel responde (só existe se houver tool)
     FORA_DE_ESCOPO = "fora_de_escopo"  # sinistro, apólice existente, outro produto
     OUTRO = "outro"
 
@@ -271,8 +272,19 @@ class SendText(BaseModel):
     text: str
 
 
+class AnswerWithTools(BaseModel):
+    """Como `Reply`, mas o turno é sobre uma pergunta que uma tool do painel responde.
+
+    A policy só a emite quando há tool habilitada (`Intent.CONSULTA`); quem decide se chama
+    alguma — e qual — é o modelo, com as `Function`s que o Responder já carrega.
+    """
+
+    kind: Literal["answer_with_tools"] = "answer_with_tools"
+    directive: str
+
+
 Action = Annotated[
-    AskField | ConfirmCep | AskPlan | DoQuote | Present | Refuse | Handoff | Reply | SendText,
+    AskField | ConfirmCep | AskPlan | DoQuote | Present | Refuse | Handoff | Reply | SendText | AnswerWithTools,
     Field(discriminator="kind"),
 ]
 

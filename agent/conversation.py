@@ -27,6 +27,7 @@ from agent.models import (
     Extraction,
     HandoffReason,
     Inbound,
+    Intent,
     LeadState,
     Outbound,
     SendText,
@@ -164,8 +165,25 @@ class Conversation:
             papel="extractor",
             latency_ms=int((time.perf_counter() - inicio) * 1000),
         )
-        turno.logger.event("extraction", message_id=inbound.message_id, **extraction.model_dump(mode="json"))
+        extraction, bruto = self._normalizar_consulta(extraction)
+        dados = extraction.model_dump(mode="json")
+        if bruto is not None:
+            dados["intent_bruto"] = bruto      # o modelo pediu consulta; sem ferramenta, não dá
+        turno.logger.event("extraction", message_id=inbound.message_id, **dados)
         return extraction
+
+    def _normalizar_consulta(self, extraction: Extraction) -> tuple[Extraction, str | None]:
+        """`consulta` sem tool habilitada vira `outro`.
+
+        O valor está no enum, logo no schema do `Extraction`, e o modelo pode escolhê-lo mesmo
+        num agente sem ferramenta nenhuma. Normalizar aqui mantém a policy alheia às tools — e o
+        comportamento entregue idêntico. O intent original fica no log, para não sumir o sinal.
+        """
+        if extraction.intent is not Intent.CONSULTA:
+            return extraction, None
+        if config_store.custom_tools_habilitadas():
+            return extraction, None
+        return extraction.model_copy(update={"intent": Intent.OUTRO}), Intent.CONSULTA.value
 
     async def _decidir_e_executar(
         self, state: LeadState, extraction: Extraction | None, turno: _Turno, rodada: int
@@ -232,7 +250,9 @@ class Conversation:
             await self._enviar(self._render(action, state), "template", turno)
             return state
 
-        if action.kind in ("ask_field", "reply"):
+        # `answer_with_tools` é uma `Reply` cuja diretiva manda usar as ferramentas do painel:
+        # o caminho é o mesmo (Responder + guard_price), o que muda é o texto da diretiva.
+        if action.kind in ("ask_field", "reply", "answer_with_tools"):
             if action.kind == "ask_field":
                 directive = directive_for_field(action.campo, action.motivo)
                 state.ultima_pergunta = action.campo

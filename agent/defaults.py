@@ -73,6 +73,11 @@ SLOTS: dict[str, dict] = {
         'label': 'Exemplos do intent pedir_desconto', 'grupo': 'extractor', 'placeholders': [],
         'default': '"tem desconto?", "consegue baixar?", "faz por menos?"',
     },
+    'intent.consulta': {
+        'label': 'Exemplos do intent consulta', 'grupo': 'extractor', 'placeholders': ['ferramentas'],
+        'default': '''pergunta do lead que UMA DESTAS ferramentas do consultor responde (só use este intent nesse caso):
+{ferramentas}''',
+    },
     'intent.fora_de_escopo': {
         'label': 'Exemplos do intent fora_de_escopo', 'grupo': 'extractor', 'placeholders': [],
         'default': '"bati o carro", "quero ver minha apólice", "seguro de vida"',
@@ -294,6 +299,13 @@ Regras:
 
 intent (escolha exatamente um):
 {intents}''',
+    },
+    'responder.diretiva_consulta': {
+        'label': 'Diretiva ao Responder: consulta com ferramenta', 'grupo': 'responder',
+        'placeholders': ['proxima'],
+        'default': 'O lead fez uma pergunta que uma das suas ferramentas responde. Use a ferramenta adequada, '
+                   'responda em até 2 frases sem inventar nada além do que ela devolveu, e em seguida retome a '
+                   'coleta: {proxima}',
     },
     'responder.instructions': {
         'label': 'Prompt do Responder (system)', 'grupo': 'responder',

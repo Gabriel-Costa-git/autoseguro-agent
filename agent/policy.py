@@ -5,6 +5,11 @@ lista de ações. Sem I/O e sem LLM, porque decisão de venda (cotar, recusar,
 escalar) precisa ser determinística, testável e auditável; o LLM só extrai
 dados e transforma `AskField`/`Reply` em texto.
 
+`Intent.CONSULTA` só chega aqui quando existe tool habilitada no painel — a
+`Conversation` normaliza para `outro` quando não existe. A policy então devolve
+`AnswerWithTools`: responde a pergunta com a ferramenta e retoma a coleta de onde
+parou, sem mexer no estágio.
+
 Quando a extração vem marcada `indisponivel` (LLM fora do ar), a policy não
 decide nada: pede a mensagem de novo. Repetir a última pergunta seria pior — o
 lead veria o mesmo texto várias vezes sem entender por quê.
@@ -23,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 from agent.defaults import SLOTS
 from agent.models import (
     Action,
+    AnswerWithTools,
     AskField,
     AskPlan,
     CampoColeta,
@@ -50,6 +56,11 @@ if TYPE_CHECKING:  # pragma: no cover - só para type hints; o executor A entreg
 def _t(key: str) -> str:
     """Texto ativo do slot, lido NA CHAMADA (o Studio troca a versão em tempo real)."""
     return store.text(key)
+
+
+def _t_ctx(key: str, **ctx: Any) -> str:
+    """Idem, para slot com placeholder."""
+    return store.text(key, **ctx)
 
 
 def _p(nome: str) -> Any:
@@ -89,6 +100,7 @@ INTENTS_UTEIS = frozenset(
         Intent.ESCOLHER_PLANO,
         Intent.OBJECAO_PRECO,
         Intent.PEDIR_DESCONTO,
+        Intent.CONSULTA,
     }
 )
 
@@ -165,6 +177,12 @@ def next_action(
     if escalou is not None:
         return s, escalou
 
+    # Pergunta que uma ferramenta responde: responde e retoma a coleta na MESMA mensagem.
+    # Vem antes das pendências porque a dúvida do lead é o que trava a conversa; a correção
+    # pendente vira justamente o "retome a coleta" da diretiva.
+    if intent is Intent.CONSULTA:
+        return s, abs_.avisos + [_consulta(s, abs_)]
+
     if abs_.pendencias:
         return s, abs_.avisos + abs_.pendencias
 
@@ -182,6 +200,24 @@ def next_action(
         return s, abs_.avisos + [SendText(text=_t("policy.txt_aguarde"))]
 
     return s, abs_.avisos + _fluxo(s, rules, today)
+
+
+# --------------------------------------------------------------------------- consulta com ferramenta
+def _consulta(s: LeadState, abs_: _Absorcao) -> Action:
+    """Diretiva do turno de consulta: responder com a ferramenta e emendar a próxima pergunta.
+
+    Não mexe em `stage` (a etapa da venda não anda por causa de uma dúvida), mas grava
+    `ultima_pergunta`: a pergunta VAI junto na mesma mensagem, e o Extractor do turno seguinte
+    precisa dela para desambiguar um "35".
+    """
+    pendente = next((a for a in abs_.pendencias if a.kind == "ask_field"), None)
+    campo = pendente.campo if pendente is not None else _campo_faltante(s)
+    if campo is not None:
+        s.ultima_pergunta = campo
+        proxima = _t(f"diretiva.{campo}")
+    else:
+        proxima = _t("policy.diretiva_pos_cotacao")
+    return AnswerWithTools(directive=_t_ctx("responder.diretiva_consulta", proxima=proxima))
 
 
 # --------------------------------------------------------------------------- absorção

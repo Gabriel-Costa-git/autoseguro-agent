@@ -489,22 +489,29 @@ class ConfigStore:
             raise ConfigError(f"tool desconhecida: {nome}")
         return tool
 
+    def custom_tools_habilitadas(self) -> list[CustomTool]:
+        """Tools ligadas, em ordem de nome. Registro ausente ou ilegível vale lista vazia.
+
+        É a pergunta que o agente faz o tempo todo ("tenho ferramenta?"), e a resposta não pode
+        derrubar o turno por causa de um JSON torto — quem mostra o erro é o painel, ao listar.
+        """
+        try:
+            tools = self.custom_tools().tools
+        except ConfigError:
+            return []
+        return [tools[nome] for nome in sorted(tools) if tools[nome].enabled]
+
     def custom_tools_version(self) -> str:
         """Impressão digital das tools HABILITADAS — o `Responder` reconstrói o Agent quando muda.
 
         Hash do conteúdo (e não mtime) para salvar/reabrir sem mexer em nada não jogar fora o
-        Agent e o histórico em cache. Registro ilegível vale vazio: o turno não pode quebrar por
-        causa de um JSON torto (o painel mostra o erro na hora de listar).
+        Agent e o histórico em cache.
         """
-        try:
-            habilitadas = {n: t for n, t in self.custom_tools().tools.items() if t.enabled}
-        except ConfigError:
-            return ""
+        habilitadas = self.custom_tools_habilitadas()
         if not habilitadas:
             return ""
         bruto = json.dumps(
-            {n: habilitadas[n].model_dump(mode="json") for n in sorted(habilitadas)},
-            ensure_ascii=False, sort_keys=True,
+            [t.model_dump(mode="json") for t in habilitadas], ensure_ascii=False, sort_keys=True
         )
         return hashlib.sha256(bruto.encode("utf-8")).hexdigest()[:16]
 

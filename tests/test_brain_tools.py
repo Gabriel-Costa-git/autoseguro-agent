@@ -13,7 +13,7 @@ import pytest
 
 from agent import brain
 from agent.conversation import Conversation, InMemoryStateStore
-from agent.models import Extraction, Inbound, Reply
+from agent.models import Extraction, Inbound, Intent, Reply
 from agent.observability import ConversationLogger
 from agent.runtime_config import ConfigStore
 from tests.fakes import (
@@ -237,3 +237,57 @@ async def test_responder_sem_tools_nao_gera_evento(loja, tmp_path):
 
     linhas = (tmp_path / "c-2.jsonl").read_text(encoding="utf-8").splitlines()
     assert "tool_call" not in [json.loads(linha)["event"] for linha in linhas]
+
+
+# --------------------------------------------------------------------------- prompt do Extractor
+def _prompt(**kw) -> str:
+    from agent.models import LeadState
+
+    return brain.build_extraction_instructions(LeadState(conversation_id="c-1"), HOJE, **kw)
+
+
+def _intents_do_prompt(prompt: str) -> list[str]:
+    bloco = prompt.split("intent (escolha exatamente um):\n", 1)[1]
+    return [linha[2:].split(":", 1)[0] for linha in bloco.splitlines() if linha.startswith("- ")]
+
+
+def test_sem_tool_o_prompt_do_extractor_nao_tem_consulta(loja):
+    prompt = _prompt()
+    assert "- consulta:" not in prompt
+    # todos os outros intents continuam lá, na ordem do enum
+    assert _intents_do_prompt(prompt) == [i.value for i in Intent if i is not Intent.CONSULTA]
+
+
+def test_com_tool_o_prompt_ganha_o_intent_consulta_com_as_ferramentas(loja):
+    loja.upsert_custom_tool("consulta_apolice", TOOL)
+    loja.upsert_custom_tool("consulta_cep", {
+        **TOOL, "descricao": "Descobre a cidade de um CEP.",
+        "parametros": {"cep": {"tipo": "string", "obrigatorio": True}},
+        "http": {"metodo": "GET", "url": "https://x.test/{cep}"},
+    })
+    prompt = _prompt()
+
+    assert "- consulta: pergunta do lead que UMA DESTAS ferramentas" in prompt
+    assert "  - consulta_apolice: Consulta a apólice do cliente pelo CPF." in prompt
+    assert "  - consulta_cep: Descobre a cidade de um CEP." in prompt
+    # a linha entra ANTES de fora_de_escopo (mesma ordem do enum)
+    assert _intents_do_prompt(prompt) == [i.value for i in Intent]
+
+
+def test_tool_desligada_nao_entra_no_prompt(loja):
+    loja.upsert_custom_tool("consulta_apolice", {**TOOL, "enabled": False})
+    assert "- consulta:" not in _prompt()
+
+
+def test_ferramentas_injetadas_vencem_o_store(loja):
+    """`ferramentas=[]` é como os goldens fixam o comportamento entregue."""
+    loja.upsert_custom_tool("consulta_apolice", TOOL)
+    assert "- consulta:" in _prompt()
+    assert "- consulta:" not in _prompt(ferramentas=[])
+
+
+def test_texto_do_intent_consulta_vem_do_slot(loja):
+    loja.upsert_custom_tool("consulta_apolice", TOOL)
+    loja.add_version("intent.consulta", "v2", "o lead pergunta sobre: {ferramentas}")
+    assert "- consulta: o lead pergunta sobre:   - consulta_apolice:" in _prompt()
+
