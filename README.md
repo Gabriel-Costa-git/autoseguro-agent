@@ -1,11 +1,27 @@
 # AutoSeguro Agent — Desafio FDE Namastex
 
-Agente de vendas de seguro auto por chat (WhatsApp). Conversa com o lead, qualifica
-(idade, carro, CEP, plano), **cota na API de cotação instável sem travar nem inventar
-preço** e **escala para um humano com critério explícito e auditável**.
+Agente de vendas de seguro auto por WhatsApp. Ele conversa com o lead, qualifica (idade,
+carro, CEP, plano, data de início), cota numa API que falha de propósito e decide, com critério
+explícito, quando resolve sozinho e quando passa para um consultor humano.
 
-O agente não fecha a venda: não existe API de contratação, então quando o lead aceita a
-cotação um consultor humano recebe os dados e a cotação prontos para emitir.
+**A ideia central: o modelo extrai e conversa; quem decide é código.** O LLM nunca vê preço,
+nunca escolhe plano e nunca decide handoff. Preço só sai do `POST /quote`, renderizado por
+template, e um guardrail descarta qualquer resposta do modelo que cite um valor que não veio da API.
+
+O que isso entrega na prática:
+
+- **Resiliência à API instável**: retry só no que é retentável (5xx, timeout), orçamento de tempo,
+  aviso ao lead quando demora, e handoff honesto sem chutar preço quando esgota.
+- **Handoff com critério**: oito motivos enumerados, cada um testado, com o payload pronto
+  para o consultor e aviso pelo WhatsApp.
+- **Rastreabilidade**: cada mensagem, cotação e chamada ao modelo vira um evento JSONL com id,
+  status, tentativas e tokens.
+- **Dados sensíveis**: PII mascarada na borda do log; o agente nunca pede CPF, e-mail ou placa.
+- **Sem rota sem saída**: testes de invariante garantem que todo estado avança ou reabre.
+- **Painel local** (Studio) para editar prompts com versão, testar no Lab e assumir atendimentos.
+
+Stack: Python 3.12, FastAPI, agno + Gemini, httpx. Sem framework de frontend, sem build.
+1020 testes rodam em ~5 s sem rede, sem LLM e sem Docker.
 
 ## Como rodar
 
@@ -223,67 +239,19 @@ policy e presenter puros. Há um teste que faz grep no `presenter.py` para garan
 valor de preço está fixo em template.
 
 ## Log de uma execução completa
-Três execuções reais (Gemini `gemini-3.5-flash-lite` + API de cotação em docker), geradas pelo
-CLI em modo roteiro e commitadas em `logs/entrega/`.
 
-> Regravados em 03/09 com o agente desta versão: a data de início é perguntada antes de cotar
-> (a pro-rata só aparece explicada), o `outbound` carrega `in_reply_to`, e a resposta do LLM
-> passa pelo guard pós-modelo. Para regravar: `uv run python -m agent.chat --script scripts/roteiro-feliz.txt --delay 3`.
+Três execuções reais (Gemini + API de cotação), gravadas pelo CLI e commitadas em `logs/entrega/`:
 
 | Arquivo | Cenário | Desfecho |
 |---|---|---|
-| `logs/entrega/caminho-feliz.jsonl` | `scripts/roteiro-feliz.txt`: saudação → idade (com CPF, e-mail e telefone não solicitados) → Onix 2022 → CEP confirmado via ViaCEP → escolhe Completo → cotação → "fechado" | `present` com R$ 209,90/mês vindo da API, depois `handoff` `lead_pediu_humano` |
-| `logs/entrega/recusa-negocio.jsonl` | `scripts/roteiro-recusa.txt`: lead de 78 anos | `refusal` honesto, sem handoff, sem chamada à API |
-| `logs/entrega/quote-indisponivel-handoff.jsonl` | mesmo roteiro feliz contra a API com `QUOTE_FAILURE_RATE=1` | 4 `quote_attempt` (500/502/503) em 3,2 s → `quote_result` `indisponivel` → `handoff` `cotacao_indisponivel`, **nenhum valor na conversa** |
+| `caminho-feliz.jsonl` | lead completo, com CPF/e-mail/telefone não solicitados | cotação apresentada e `handoff` com payload para o consultor |
+| `recusa-negocio.jsonl` | condutor de 78 anos | `refusal` honesto, sem handoff e sem chamar a API |
+| `quote-indisponivel-handoff.jsonl` | mesmo roteiro contra a API com 100 % de falha | 4 `quote_attempt` (5xx) → `handoff` `cotacao_indisponivel`, zero valor inventado |
 
-Cada linha do JSONL é um evento com `ts`, `conversation_id`, `event`, `message_id`, `quote_id`
-e `data`. O trecho do handoff do caminho feliz (resumido) mostra o que o consultor humano recebe:
-
-```json
-{
-  "ts": "2026-09-03T15:31:10.839155+00:00",
-  "conversation_id": "demo-feliz",
-  "event": "handoff",
-  "message_id": "m8",
-  "data": {
-    "reason": "lead_pediu_humano",
-    "payload": {
-      "dados": {
-        "nome": null,
-        "idade": 35,
-        "veiculos": [
-          {
-            "texto": "Onix 2022",
-            "ano": 2022
-          }
-        ],
-        "veiculo_texto": "Onix 2022",
-        "veiculo_ano": 2022,
-        "cep": "01310-***",
-        "cep_cidade": "São Paulo",
-        "cep_uf": "SP",
-        "cep_ausente": false,
-        "plano_id": "completo",
-        "data_inicio": "2026-09-03",
-        "data_assumida": false
-      },
-      "motivo": "lead_pediu_humano",
-      "conversation_id": "demo-feliz",
-      "quote_id": "qf42b65d3"
-    }
-  }
-}
-```
-
-A mensagem com CPF, e-mail e telefone aparece no log já mascarada (`***.***.***-**`,
-`***@gmail.com`, `+55 ** *****-****`), porque a máscara roda na borda do log. A degradação
-honesta quando o próprio LLM falha ("não consegui ler sua mensagem, pode repetir?") apareceu
-em rodadas de desenvolvimento sob a cota gratuita e está coberta por teste; o CLI em modo
-roteiro reenvia a linha quando o agente pede.
-
-**Gate de PII da entrega:** `uv run python scripts/check_logs_pii.py "logs/entrega/*.jsonl"`
-varre os três logs por CPF, e-mail, telefone, placa e CEP completo e falha se achar qualquer um
-em claro. Resultado na entrega: `3 arquivo(s) verificado(s), 0 ocorrência(s) de PII em claro`.
+Cada linha é um evento com `ts`, `conversation_id`, `event`, `message_id`, `quote_id` e `data`.
+A PII enviada pelo lead já aparece mascarada no log (`***.***.***-**`, `***@gmail.com`,
+`+55 ** *****-****`). Gate: `uv run python scripts/check_logs_pii.py` → `0 ocorrência(s)`.
+Para regravar: `uv run python -m agent.chat --script scripts/roteiro-feliz.txt --delay 3`.
 
 ## Falhas tratadas
 
@@ -394,9 +362,8 @@ Detalhe de cada tela e o contrato de `config/`: **[`docs/STUDIO.md`](docs/STUDIO
 
 ## Transparência de uso de IA
 
-Construído com **orquestração multi-agente com Claude Code**: um terminal orquestrador e
-executores paralelos, cada um com escopo de arquivos fechado. Em `ai-logs/`: `briefs/` (as
-instruções dadas a cada executor), `reports/` (o que cada um entregou e decidiu) e
-`sessions/` (os transcripts `.jsonl`, exportados e higienizados por
-`scripts/export_ai_logs.py`). `ai-logs/README.md` explica o que foi redigido, por quê, e como
-validar (`--check`).
+Construído com orquestração multi-agente no Claude Code: um terminal orquestrador e executores
+paralelos, cada um com escopo de arquivos fechado, briefs escritos antes e reportes depois.
+As sessões estão sendo separadas de outros projetos do mesmo ambiente e higienizadas
+(segredos, dados pessoais, caminhos da máquina) e entram em `ai-logs/` num push seguinte, com
+`scripts/export_ai_logs.py` como exportador reprodutível e `--check` como gate.
