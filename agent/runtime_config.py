@@ -83,6 +83,7 @@ class QuoteClientTools(BaseModel):
     max_attempts: int | None = Field(None, ge=1, le=10)
     budget_s: float | None = Field(None, gt=0)
     backoff_base_s: float | None = Field(None, ge=0)
+    planos_ttl_s: float | None = Field(None, ge=0)   # 0 = relê o /planos a cada uso
 
 
 class ViacepTools(BaseModel):
@@ -97,6 +98,8 @@ class PolicyTools(BaseModel):
     objecoes_ate_handoff: int | None = Field(None, ge=1)
     plano_padrao: str | None = None            # assumido quando o lead não escolhe
     max_veiculos: int | None = Field(None, ge=1, le=5)
+    max_indisponivel: int | None = Field(None, ge=1)   # extrações falhas seguidas → humano
+    max_midias: int | None = Field(None, ge=1)         # mídias seguidas sem texto → humano
 
 
 class RulesTools(BaseModel):
@@ -297,6 +300,7 @@ def _code_defaults() -> dict[str, dict[str, Any]]:
                 "max_attempts": settings.quote_max_attempts,
                 "budget_s": settings.quote_budget_s,
                 "backoff_base_s": settings.quote_backoff_base_s,
+                "planos_ttl_s": 90.0,
             },
             "viacep": {"enabled": True, "url": settings.viacep_url, "timeout_s": settings.viacep_timeout_s},
             "policy": {
@@ -305,6 +309,8 @@ def _code_defaults() -> dict[str, dict[str, Any]]:
                 "objecoes_ate_handoff": 2,
                 "plano_padrao": "essencial",
                 "max_veiculos": 3,
+                "max_indisponivel": 3,
+                "max_midias": 3,
             },
             "rules": {"pre_validacao_local": True},
             "handoff": {

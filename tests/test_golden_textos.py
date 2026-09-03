@@ -23,5 +23,8 @@ def test_texto_igual_ao_golden(nome: str) -> None:
 
 
 def test_todos_os_goldens_tem_caso() -> None:
-    arquivos = {p.stem for p in GOLDEN_DIR.glob("*.txt")}
+    # `fluxo_*` são goldens de CONVERSA INTEIRA (transcrição de um roteiro), gerados e
+    # comparados em `test_conversation.py::test_fluxo_igual_ao_golden`. Eles moram no mesmo
+    # diretório porque são a mesma ideia — texto congelado — mas não saem de `golden_cases`.
+    arquivos = {p.stem for p in GOLDEN_DIR.glob("*.txt") if not p.stem.startswith("fluxo_")}
     assert arquivos == set(CASOS)

@@ -131,20 +131,22 @@ def test_mensagem_do_lab_marca_a_origem_lab(tmp_path, monkeypatch):
 
 def test_conversa_completa_ate_a_cotacao_com_o_agente_real(tmp_path, monkeypatch):
     """Caminho feliz de ponta a ponta: o preço só aparece depois da API responder."""
+    # "01310-100" e "sim" nem chegam ao Extractor: o pré-parser do `conversation` resolve os
+    # dois. O roteiro tem só os quatro turnos que vão ao LLM.
     extracoes = [
         FakeRun(content=Extraction(intent=Intent.FORNECER_DADOS, idade=35)),
         FakeRun(content=Extraction(intent=Intent.ESCOLHER_PLANO, plano_id="completo")),
         FakeRun(content=Extraction(intent=Intent.FORNECER_DADOS, veiculo_texto="Onix", veiculo_ano=2019)),
-        FakeRun(content=Extraction(intent=Intent.FORNECER_DADOS, cep="01310-100")),
-        FakeRun(content=Extraction(intent=Intent.CONFIRMAR)),
+        FakeRun(content=Extraction(intent=Intent.FORNECER_DADOS, data_inicio=HOJE)),
     ]
     respostas = [FakeRun(content=f"pergunta {n}") for n in range(1, 5)]
     client, _ = _app(tmp_path, monkeypatch, extracoes, respostas, status_quote=[503, 200])
     sid = _sid(client)
 
-    for texto in ["tenho 35", "quero o completo", "Onix 2019", "01310-100"]:
+    # A data de início é o último campo da coleta, depois da confirmação do CEP.
+    for texto in ["tenho 35", "quero o completo", "Onix 2019", "01310-100", "sim"]:
         client.post(f"/api/lab/sessions/{sid}/messages", json={"text": texto})
-    corpo = client.post(f"/api/lab/sessions/{sid}/messages", json={"text": "sim"}).json()
+    corpo = client.post(f"/api/lab/sessions/{sid}/messages", json={"text": "hoje mesmo"}).json()
 
     assert corpo["state"]["stage"] == "apresentado"
     assert corpo["state"]["cotacao"]["outcome"] == "ok"
@@ -167,19 +169,21 @@ def test_midia_sem_texto_nao_chama_o_llm(tmp_path, monkeypatch):
 
 # --------------------------------------------------------------------------- eventos
 def test_barramento_recebe_eventos_do_logger_e_o_llm_trace(tmp_path, monkeypatch):
-    # duas mensagens: a 1ª (idade) é respondida por template, a 2ª (plano) chama o Responder
+    # Duas mensagens: a 1ª (idade) é respondida por template (a vitrine de planos) e a 2ª é uma
+    # dúvida sobre o produto, que é o que ainda chama o Responder — pergunta seca de campo virou
+    # template (template-first), então não serve mais para exercitar o trace do responder.
     client, manager = _app(
         tmp_path,
         monkeypatch,
         [
             FakeRun(content=Extraction(intent=Intent.FORNECER_DADOS, idade=35)),
-            FakeRun(content=Extraction(intent=Intent.ESCOLHER_PLANO, plano_id="completo")),
+            FakeRun(content=Extraction(intent=Intent.DUVIDA_PRODUTO)),
         ],
-        [FakeRun(content="Qual o ano do carro?")],
+        [FakeRun(content="O Completo cobre vidros, sim.")],
     )
     sid = _sid(client)
     client.post(f"/api/lab/sessions/{sid}/messages", json={"text": "oi, tenho 35 anos"})
-    client.post(f"/api/lab/sessions/{sid}/messages", json={"text": "quero o completo"})
+    client.post(f"/api/lab/sessions/{sid}/messages", json={"text": "o completo cobre vidros?"})
 
     eventos = manager.sessao(sid).bus.historico()
     kinds = [e["event"] for e in eventos]

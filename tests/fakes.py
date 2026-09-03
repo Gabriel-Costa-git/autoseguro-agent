@@ -113,6 +113,16 @@ class FakeRules:
             PlanoResumo(id="completo", nome="Completo", franquia=3000.0, coberturas=["colisao", "roubo"]),
         ]
 
+    def plano_ids(self) -> list[str]:
+        return [p.id for p in self.planos_resumo()]
+
+    def normalize_cep(self, texto: str) -> str | None:
+        digitos = "".join(c for c in texto if c.isdigit())
+        return digitos if len(digitos) == 8 else None
+
+    def validate_request(self, req: QuoteRequest) -> list[Any]:
+        return []
+
 
 # --------------------------------------------------------------------------- infra
 class FakeQuoteClient:
@@ -304,35 +314,12 @@ class ClockFake:
 
 
 # --------------------------------------------------------------------------- planos
-# Mesmo formato do `plans.json` da API do desafio, para montar `Rules` sem rede.
-PLANOS: dict = {
-    "moeda": "BRL",
-    "planos": [
-        {"id": "essencial", "nome": "Essencial", "base_mensal": 119.90, "franquia": 4500,
-         "coberturas": ["colisao", "roubo", "furto"]},
-        {"id": "completo", "nome": "Completo", "base_mensal": 209.90, "franquia": 3000,
-         "coberturas": ["colisao", "roubo", "furto", "terceiros", "vidros"]},
-        {"id": "premium", "nome": "Premium", "base_mensal": 339.90, "franquia": 1500,
-         "coberturas": ["colisao", "roubo", "furto", "terceiros", "vidros", "carro_reserva"]},
-    ],
-    "regras": {
-        "faixa_etaria": [
-            {"idade_min": 18, "idade_max": 24, "multiplicador": 1.60},
-            {"idade_min": 25, "idade_max": 29, "multiplicador": 1.25},
-            {"idade_min": 30, "idade_max": 59, "multiplicador": 1.00},
-            {"idade_min": 60, "idade_max": 75, "multiplicador": 1.40},
-            {"idade_min": 76, "idade_max": 200, "recusar": True, "motivo": "Idade acima do limite."},
-        ],
-        "idade_veiculo": [
-            {"anos_min": 0, "anos_max": 5, "multiplicador": 1.00},
-            {"anos_min": 6, "anos_max": 10, "multiplicador": 1.15},
-            {"anos_min": 11, "anos_max": 20, "multiplicador": 1.45},
-            {"anos_min": 21, "anos_max": 200, "recusar": True, "motivo": "Veículo muito antigo."},
-        ],
-        "regiao_cep": {"prefixos_alto_risco": ["07", "08", "21", "26", "59"], "multiplicador": 1.30},
-        "carencia": {"coberturas_com_carencia": ["roubo", "furto"], "dias": 30},
-    },
-}
+# Cópia FIEL do `plans.json` do desafio (`tests/fixtures/plans.json`). Antes era uma cópia à mão
+# que já tinha divergido do original — o Premium sem `assistencia_24h`, motivos de recusa
+# reescritos e sem `entrada_meio_mes` —, e a suíte media uma regra que não existe.
+FIXTURES = Path(__file__).parent / "fixtures"
+PLANOS: dict = json.loads((FIXTURES / "plans.json").read_text(encoding="utf-8"))
+
 
 QUOTE_200: dict = {
     "plano_id": "completo", "plano_nome": "Completo", "premio_mensal": 209.9, "franquia": 3000,

@@ -10,9 +10,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 from agent.brain import Extractor, Responder, resumo_state
 from agent.config import settings
@@ -38,7 +39,29 @@ def _params_quote_client() -> dict:
         "max_attempts": store.param("tools.quote_client.max_attempts"),
         "budget_s": store.param("tools.quote_client.budget_s"),
         "backoff_base_s": store.param("tools.quote_client.backoff_base_s"),
+        "planos_ttl_s": store.param("tools.quote_client.planos_ttl_s"),
     }
+
+
+def _provedor_de_regras(client: QuoteClient, today: Callable[[], date]) -> Callable[[], Awaitable[Rules]]:
+    """Fecha sobre o client e devolve as `Rules` de AGORA: catálogo com TTL + `today()` novo.
+
+    Duas coisas estragam regra derivada: um `/planos` que mudou e um processo que atravessou a
+    virada do ano com o `today` do boot congelado (em 1º de janeiro um carro que era aceito
+    deixa de ser). O memo é por (catálogo, dia): dentro do mesmo dia e do mesmo catálogo, o
+    `Rules` devolvido é literalmente o mesmo objeto, então reler é de graça.
+    """
+    memo: dict[str, Any] = {}
+
+    async def provider() -> Rules:
+        snapshot = await client.planos()
+        chave = (id(snapshot.planos), today())
+        if memo.get("chave") != chave:
+            memo["chave"] = chave
+            memo["rules"] = Rules.from_planos(snapshot.planos, today())
+        return memo["rules"]
+
+    return provider
 
 
 async def montar_conversa(
@@ -66,8 +89,10 @@ async def montar_conversa(
         max_attempts=p["max_attempts"],
         budget_s=p["budget_s"],
         backoff_base_s=p["backoff_base_s"],
+        planos_ttl_s=p["planos_ttl_s"],
         params=_params_quote_client,
     )
+    rules_provider = _provedor_de_regras(client, today)
     try:
         planos = await client.get_planos()
     except QuotePlanosUnavailable as exc:
@@ -86,6 +111,7 @@ async def montar_conversa(
         today=today,
         logger_factory=logger_factory,
         on_handoff=on_handoff,
+        rules_provider=rules_provider,
     )
 
 

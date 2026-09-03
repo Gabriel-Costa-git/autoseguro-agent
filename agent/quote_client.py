@@ -6,12 +6,20 @@ então retry é seguro; erros de negócio (422 `cotacao_recusada`) e bugs nossos
 (422 `detail` / 400 `payload_invalido`) NUNCA são retentados — não adianta
 tentar de novo uma recusa ou um payload malformado.
 
-Matemática do retry (`max_attempts=4`, cada tentativa independente com 20% de
-falha de infra): P(as 4 esgotarem por infra) = 0.3^4 ≈ 0.8% — timeout entra
-nessa conta como falha (é a fração "lenta" que também vira retry). Pior caso
-de tempo, sem cortar por orçamento: 4 tentativas × timeout_s (3.5s) mais os
-backoffs entre elas; `budget_s` (15s) é o teto duro que interrompe a série
-antes de estourar esse pior caso.
+Matemática do retry (cada tentativa independente com 30% de chance de falhar
+por infra — 20% de 5xx mais os 10% lentos que estouram o timeout): com 3
+tentativas, P(esgotar) = 0.3³ ≈ 2,7%; com 4, 0.3⁴ ≈ 0,8%. Na prática, com a
+API 100% lenta a série para em 3: depois de 3 timeouts o relógio já passou de
+11,25s e a 4ª exigiria ≥ 15,75s, acima do `budget_s` de 15s. `max_attempts=4`
+é o teto de tentativas; `budget_s` é o teto de tempo, e é ele que manda quando
+todas as respostas são lentas.
+
+`GET /planos` usa o MESMO retry: as regras de aceitação (idade, ano do veículo)
+mudam com o tempo e com o calendário, então o catálogo é recarregado a cada
+`planos_ttl_s`. Falhou depois de já ter uma cópia boa? Devolve a cópia marcada
+`stale` — errar a data de validade das regras é muito menos grave que derrubar
+a conversa. `QuotePlanosUnavailable` só sobe quando não há cópia nenhuma, que é
+o boot (fail-fast do CLI/serve).
 """
 from __future__ import annotations
 
@@ -20,7 +28,8 @@ import random
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import httpx
 
@@ -35,7 +44,26 @@ from agent.models import (
 
 
 class QuotePlanosUnavailable(Exception):
-    """GET /planos falhou (rede/timeout/status != 200). O chamador decide o que fazer."""
+    """GET /planos falhou e não há cópia em memória. O chamador decide o que fazer."""
+
+
+PlanosOrigem = Literal["http", "cache", "stale"]
+
+
+@dataclass(frozen=True)
+class PlanosSnapshot:
+    """De onde veio o catálogo desta leitura — é o que vira o evento `planos_refresh`."""
+
+    planos: dict
+    origem: PlanosOrigem
+    obtido_em: float            # leitura do `clock` em que a cópia BOA foi buscada
+    idade_s: float              # há quanto tempo essa cópia foi buscada
+    erro: str | None = None     # preenchido só em `stale`
+    latency_ms: int = 0         # tempo do GET desta leitura; 0 quando veio do cache
+
+    @property
+    def stale(self) -> bool:
+        return self.origem == "stale"
 
 
 class QuoteClient:
@@ -51,6 +79,7 @@ class QuoteClient:
         backoff_base_s: float = 0.5,
         rng: random.Random | None = None,
         params: Callable[[], dict] | None = None,
+        planos_ttl_s: float = 90.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout_s = timeout_s
@@ -62,7 +91,10 @@ class QuoteClient:
         self._backoff_base_s = backoff_base_s
         self._rng = rng or random.Random()
         self._params = params
+        self._planos_ttl_s = planos_ttl_s
         self._planos_cache: dict | None = None
+        self._planos_obtido_em: float | None = None
+        self.ultimo_planos: PlanosSnapshot | None = None   # lido pelo `conversation` para o log
 
     def _cfg(self) -> tuple[float, int, float, float]:
         """timeout, tentativas, orçamento e backoff desta chamada.
@@ -81,23 +113,91 @@ class QuoteClient:
             float(p.get("backoff_base_s", self._backoff_base_s)),
         )
 
+    def _ttl(self) -> float:
+        """TTL do catálogo, relido a cada chamada (o Studio muda em tempo real)."""
+        if self._params is None:
+            return self._planos_ttl_s
+        return float((self._params() or {}).get("planos_ttl_s", self._planos_ttl_s))
+
     def _new_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(base_url=self._base_url, transport=self._transport)
 
     async def get_planos(self) -> dict:
-        """GET /planos, cacheado em memória após o 1º sucesso (a API é estável, não precisa retry)."""
-        if self._planos_cache is not None:
-            return self._planos_cache
-        timeout_s, _, _, _ = self._cfg()
+        """O catálogo corrente. Levanta `QuotePlanosUnavailable` só quando não há cópia nenhuma."""
+        return (await self.planos()).planos
+
+    async def planos(self) -> PlanosSnapshot:
+        """Catálogo com TTL: dentro do prazo devolve a cópia, fora dele tenta a API.
+
+        Falha com cópia em mãos vira `stale` (a conversa segue com regras de minutos atrás);
+        falha sem cópia levanta — é o boot, e aí a mensagem clara vale mais que um agente que
+        acha que sabe as regras.
+        """
+        agora = self._clock()
+        if self._planos_cache is not None and self._planos_obtido_em is not None:
+            idade = agora - self._planos_obtido_em
+            if idade < self._ttl():
+                return self._registrar(PlanosSnapshot(self._planos_cache, "cache", self._planos_obtido_em, idade))
+
+        inicio = time.perf_counter()
+        try:
+            planos = await self._buscar_planos()
+        except QuotePlanosUnavailable as exc:
+            if self._planos_cache is None or self._planos_obtido_em is None:
+                raise
+            return self._registrar(
+                PlanosSnapshot(
+                    self._planos_cache,
+                    "stale",
+                    self._planos_obtido_em,
+                    self._clock() - self._planos_obtido_em,
+                    erro=str(exc)[:200],
+                    latency_ms=int((time.perf_counter() - inicio) * 1000),
+                )
+            )
+
+        self._planos_cache = planos
+        self._planos_obtido_em = self._clock()
+        return self._registrar(
+            PlanosSnapshot(
+                planos, "http", self._planos_obtido_em, 0.0,
+                latency_ms=int((time.perf_counter() - inicio) * 1000),
+            )
+        )
+
+    def _registrar(self, snapshot: PlanosSnapshot) -> PlanosSnapshot:
+        self.ultimo_planos = snapshot
+        return snapshot
+
+    async def _buscar_planos(self) -> dict:
+        """GET /planos com o MESMO retry/backoff/orçamento do `quote()`.
+
+        5xx e timeout são retentados (a API cai de propósito); 4xx não melhora tentando de novo.
+        """
+        timeout_s, max_attempts, budget_s, backoff_base_s = self._cfg()
+        start = self._clock()
+        erro = "sem tentativas"
         async with self._new_client() as client:
-            try:
-                resp = await client.get("/planos", timeout=timeout_s)
-            except (httpx.TimeoutException, httpx.TransportError) as exc:
-                raise QuotePlanosUnavailable(_short_error(exc)) from exc
-        if resp.status_code != 200:
-            raise QuotePlanosUnavailable(f"GET /planos -> {resp.status_code}")
-        self._planos_cache = resp.json()
-        return self._planos_cache
+            n = 1
+            while True:
+                try:
+                    resp = await client.get("/planos", timeout=timeout_s)
+                except (httpx.TimeoutException, httpx.TransportError) as exc:
+                    erro = _short_error(exc)
+                else:
+                    if resp.status_code == 200:
+                        return resp.json()
+                    erro = f"GET /planos -> {resp.status_code}"
+                    if not 500 <= resp.status_code < 600:
+                        break
+                if n >= max_attempts:
+                    break
+                sleep_s = self._backoff_seconds(n, backoff_base_s)
+                if (self._clock() - start) + sleep_s + timeout_s > budget_s:
+                    break
+                await self._sleep(sleep_s)
+                n += 1
+        raise QuotePlanosUnavailable(erro)
 
     async def quote(
         self,

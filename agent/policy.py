@@ -96,12 +96,21 @@ TXT_TERMINAL_ENCERRADO = _default("policy.txt_terminal_encerrado")
 TXT_AGUARDE = _default("policy.txt_aguarde")
 TXT_INSTABILIDADE = _default("policy.txt_instabilidade")
 TXT_DATA_PASSADA = _default("policy.txt_data_passada")
+TXT_CEP_AUSENTE = _default("policy.txt_cep_ausente")
+TXT_MIDIA_2 = _default("policy.txt_midia_2")
 DIRETIVA_OBJECAO = _default("policy.diretiva_objecao")
 DIRETIVA_POS_COTACAO = _default("policy.diretiva_pos_cotacao")
 DIRETIVA_MESMO_PLANO = _default("policy.diretiva_mesmo_plano")
 MOTIVO_ANO_MODELO = _default("policy.motivo_ano_modelo")
 
 STAGES_TERMINAIS = frozenset({Stage.HANDOFF, Stage.ENCERRADO, Stage.ENCERRADO_RECUSA})
+# Terminais que a mensagem seguinte do lead ainda pode reabrir (o HANDOFF, não: lá já tem gente).
+STAGES_REABRIVEIS = frozenset({Stage.ENCERRADO, Stage.ENCERRADO_RECUSA})
+
+# Sinal do `conversation` para "estado terminal, não gastei o Extractor". Não é `None` (que é
+# mídia sem texto) nem uma extração de verdade: é uma constante que a policy reconhece por
+# identidade e trata como "não sei o que o lead disse".
+TERMINAL_SEM_EXTRACAO = Extraction(intent=Intent.OUTRO, observacao="terminal_sem_extracao")
 
 # Intents que, mesmo sem trazer dado novo, movem a conversa (não contam como estagnação).
 INTENTS_UTEIS = frozenset(
@@ -126,7 +135,21 @@ _STAGE_DO_CAMPO: dict[CampoColeta, Stage] = {
     "veiculo": Stage.COLETA_VEICULO,
     "cep": Stage.COLETA_CEP,
     "plano": Stage.ESCOLHA_PLANO,
-    "data_inicio": Stage.ESCOLHA_PLANO,
+    "data_inicio": Stage.COLETA_DATA,
+}
+
+# Intents que NÃO são tentativa de responder a pergunta pendente: uma dúvida no meio da coleta
+# do CEP não pode gastar uma das tentativas de CEP do lead.
+_INTENTS_QUE_NAO_RESPONDEM = frozenset(
+    {Intent.DUVIDA_PRODUTO, Intent.CONSULTA, Intent.OBJECAO_PRECO, Intent.PEDIR_DESCONTO, Intent.ACEITAR}
+)
+
+# Campo da violação (`Violation.campo`) → campo de coleta que a policy sabe perguntar.
+_CAMPO_DA_VIOLACAO: dict[str, CampoColeta] = {
+    "idade": "idade",
+    "veiculo_ano": "veiculo",
+    "cep": "cep",
+    "data_inicio": "data_inicio",
 }
 
 
@@ -156,41 +179,39 @@ def next_action(
     if extraction is None:
         if s.stage is Stage.COTANDO and _veiculos_cotados(s):
             return _pos_cotacao(s)
-        if s.stage is Stage.CONFIRMA_CEP and s.cep_info is not None and not s.cep_confirmado:
+        # `cep_confirmacao_pedida` separa a re-entrada (o conversation acabou de trazer o ViaCEP)
+        # da MÍDIA que chega depois — as duas chegam aqui como `None`. Sem essa distinção, o lead
+        # que mandava áudio na confirmação do CEP levava a mesma pergunta para sempre.
+        if (
+            s.stage is Stage.CONFIRMA_CEP
+            and s.cep_info is not None
+            and not s.cep_confirmado
+            and not s.cep_confirmacao_pedida
+        ):
             acoes = _resolver_cep(s)
             return (s, acoes) if acoes is not None else (s, _fluxo(s, rules, today))
 
     s.turnos += 1
 
-    # Estado terminal: responde educado, sem reabrir a coleta — com duas exceções.
     if s.stage in STAGES_TERMINAIS:
-        util = extraction is not None and not extraction.indisponivel
-        # 1) Pedido explícito de humano vale em QUALQUER etapa (antes ele virava a frase de encerrado).
-        if util and extraction.intent is Intent.PEDIR_HUMANO and s.stage is not Stage.HANDOFF:
-            return _handoff(s, HandoffReason.LEAD_PEDIU_HUMANO)
-        # 2) Recusa que o lead corrigiu na mensagem seguinte: reabre em vez de encerrar de novo.
-        if util and s.stage is Stage.ENCERRADO_RECUSA and _traz_correcao(s, extraction):
-            campo = s.recusa_campo or "o dado"
-            _reabrir(s)
-            abs_ = _absorver(s, extraction, rules, today)
-            if abs_.refuse is not None:      # corrigiu para outro valor inválido: recusa de novo
-                s.stage = Stage.ENCERRADO_RECUSA
-                s.recusa_campo = abs_.campo_recusado
-                return s, [abs_.refuse]
-            contexto = _t_ctx("policy.diretiva_reabertura", campo=_CAMPO_LEGIVEL.get(campo, campo))
-            return s, abs_.avisos + _fluxo(s, rules, today, contexto=contexto)
-        terminal = "handoff" if s.stage is Stage.HANDOFF else "encerrado"
-        texto = _t(f"policy.txt_terminal_{terminal}")
-        return s, [SendText(text=texto)]
+        return _terminal(s, extraction, rules, today)
 
     if extraction is None:
-        return _com_estagnacao(s, [SendText(text=_t("policy.txt_midia"))], progresso=False)
+        return _midia(s)
 
     # Extração indisponível (LLM fora): não sabemos o que o lead disse, então NÃO
     # re-executamos o fluxo — foi assim que o lead levou a lista de planos 3x seguidas.
-    # Pede para repetir e conta como turno sem progresso: se o LLM ficar fora, escala.
+    # Pede para repetir; N seguidas viram handoff `sistema_instavel` (e nunca "não consigo
+    # te ajudar": o problema é nosso, não do lead).
     if extraction.indisponivel:
+        s.indisponiveis += 1
+        if s.indisponiveis >= int(_p("tools.policy.max_indisponivel")):
+            return _handoff(s, HandoffReason.SISTEMA_INSTAVEL)
         return _com_estagnacao(s, [SendText(text=_t("policy.txt_instabilidade"))], progresso=False)
+
+    # Chegou texto legível: os contadores de degradação zeram.
+    s.indisponiveis = 0
+    s.midias = 0
 
     intent = extraction.intent
     if intent is Intent.PEDIR_HUMANO:
@@ -217,6 +238,12 @@ def next_action(
     if s.plano_id is None and s.plano_perguntado and _campo_faltante(s) == "plano":
         progresso = _assumir_plano(s, rules) or progresso
 
+    # Mesma regra para a data: perguntada uma vez, resposta que não traz data vira "hoje" — e o
+    # `data_assumida` faz a apresentação dizer isso em voz alta, em vez de o pro-rata aparecer
+    # do nada por causa de uma data que ninguém escolheu.
+    if s.data_inicio is None and not s.data_assumida and s.data_perguntada and _campo_faltante(s) == "data_inicio":
+        progresso = _assumir_data(s) or progresso
+
     s, escalou = _atualizar_estagnacao(s, progresso)
     if escalou is not None:
         return s, escalou
@@ -237,6 +264,7 @@ def next_action(
 
     # CEP recém-informado ou ainda não confirmado.
     if s.stage is Stage.CONFIRMA_CEP and not s.cep_confirmado:
+        _absorver_confirmacao_neutra(s, intent)
         acoes = _resolver_cep(s)
         if acoes is not None:
             return s, abs_.avisos + acoes
@@ -249,6 +277,46 @@ def next_action(
         return s, abs_.avisos + [SendText(text=_t("policy.txt_aguarde"))]
 
     return s, abs_.avisos + _fluxo(s, rules, today)
+
+
+# --------------------------------------------------------------------------- estados terminais
+def _terminal(
+    s: LeadState, extraction: Extraction | None, rules: Rules, today: date
+) -> tuple[LeadState, list[Action]]:
+    """Responde UMA vez ao estado terminal, e depois silencia.
+
+    Silenciar é o que faltava no incidente do WhatsApp: 23 eventos de protocolo viraram 23
+    mensagens idênticas para um número real. Antes do silêncio vêm as duas saídas legítimas:
+    pedir humano (vale em qualquer etapa) e a reabertura de um encerramento.
+    """
+    util = (
+        extraction is not None
+        and extraction is not TERMINAL_SEM_EXTRACAO
+        and not extraction.indisponivel
+    )
+    if util and extraction.intent is Intent.PEDIR_HUMANO and s.stage is not Stage.HANDOFF:
+        return _handoff(s, HandoffReason.LEAD_PEDIU_HUMANO)
+
+    if util and s.stage in STAGES_REABRIVEIS and _quer_reabrir(s, extraction):
+        return _reabertura(s, extraction, rules, today)
+
+    if s.terminal_avisado:
+        return s, []            # já avisamos uma vez; o humano é quem fala agora
+    s.terminal_avisado = True
+    terminal = "handoff" if s.stage is Stage.HANDOFF else "encerrado"
+    return s, [SendText(text=_t(f"policy.txt_terminal_{terminal}"))]
+
+
+def _midia(s: LeadState) -> tuple[LeadState, list[Action]]:
+    """Mensagem sem texto. Insistir no mesmo pedido não resolve: na Nª, chama gente."""
+    s.midias += 1
+    if s.midias >= int(_p("tools.policy.max_midias")):
+        s, acoes = _handoff(s, HandoffReason.SEM_PROGRESSO)
+        # O texto do handoff por mídia é outro; quem renderiza é o presenter, pelo slot indicado.
+        acoes[0].payload["texto_slot"] = "presenter.handoff.so_midia"
+        return s, acoes
+    texto = _t("policy.txt_midia_2") if s.midias >= 2 else _t("policy.txt_midia")
+    return _com_estagnacao(s, [SendText(text=texto)], progresso=False)
 
 
 # --------------------------------------------------------------------------- perguntas do lead
@@ -299,6 +367,53 @@ def _dados_dos_planos(rules: Rules) -> str:
 _CAMPO_LEGIVEL = {"idade": "a idade", "veiculo_ano": "o ano do carro"}
 
 
+def _quer_reabrir(s: LeadState, e: Extraction) -> bool:
+    """A mensagem mostra vontade de cotar de novo?
+
+    Três sinais, do mais forte ao mais fraco: a correção do campo recusado, um dado novo
+    qualquer, ou um intent que só existe dentro de uma cotação (escolher plano, fornecer dados).
+    "Quero cotar outro carro" e "cota pro meu pai" chegam por um destes — o Extractor traz o
+    carro/a idade, ou classifica como `fornecer_dados`.
+    """
+    if _traz_correcao(s, e):
+        return True
+    if e.intent in (Intent.ESCOLHER_PLANO, Intent.FORNECER_DADOS):
+        return True
+    return _traz_dado_novo(e)
+
+
+def _traz_dado_novo(e: Extraction) -> bool:
+    return (
+        e.idade is not None
+        or e.cep is not None
+        or e.plano_id is not None
+        or e.data_inicio is not None
+        or bool(_veiculos_da_extracao(e))
+    )
+
+
+def _reabertura(
+    s: LeadState, e: Extraction, rules: Rules, today: date
+) -> tuple[LeadState, list[Action]]:
+    """Volta o encerramento para a coleta e segue o roteiro na MESMA mensagem."""
+    correcao = _traz_correcao(s, e)
+    campo = s.recusa_campo or "o dado"
+    # Sem correção do campo recusado, o valor velho é apagado: "quero cotar outro carro" tem de
+    # perguntar o carro de novo, não recotar o que acabou de ser recusado.
+    _reabrir(s, limpar=None if correcao else s.recusa_campo)
+    abs_ = _absorver(s, e, rules, today)
+    if abs_.refuse is not None:          # corrigiu para outro valor inválido: recusa de novo
+        s.stage = Stage.ENCERRADO_RECUSA
+        s.recusa_campo = abs_.campo_recusado
+        return s, [abs_.refuse]
+    contexto = (
+        _t_ctx("policy.diretiva_reabertura", campo=_CAMPO_LEGIVEL.get(campo, campo))
+        if correcao
+        else None
+    )
+    return s, abs_.avisos + _fluxo(s, rules, today, contexto=contexto)
+
+
 def _traz_correcao(s: LeadState, e: Extraction) -> bool:
     """A mensagem traz um valor NOVO para o campo que causou a recusa?
 
@@ -312,12 +427,19 @@ def _traz_correcao(s: LeadState, e: Extraction) -> bool:
     return False
 
 
-def _reabrir(s: LeadState) -> None:
+def _reabrir(s: LeadState, limpar: str | None = None) -> None:
     """Volta a conversa para a coleta: o erro de digitação não pode custar a venda."""
     s.stage = Stage.INICIO
     s.handoff_reason = None
     s.recusa_campo = None
     s.turnos_sem_progresso = 0
+    s.terminal_avisado = False
+    if limpar == "idade":
+        s.idade = None
+    elif limpar == "veiculo_ano":
+        s.veiculos = []
+        s.quote_result = None
+        _sincronizar_veiculo(s)
 
 
 # --------------------------------------------------------------------------- absorção
@@ -341,62 +463,111 @@ def _absorver(s: LeadState, e: Extraction, rules: Rules, today: date) -> _Absorc
     if _absorver_veiculos(s, e, rules, today, out, pre_validacao) is not None:
         return out
 
-    if e.cep is not None:
-        cep8 = rules.normalize_cep(e.cep)
-        if cep8 is None:
-            s.cep_tentativas += 1
-            if s.cep_tentativas > _p("tools.policy.max_cep_tentativas"):
-                # Insistir mais só irrita: cota sem CEP e avisa que o valor pode subir.
-                s.cep_ausente = True
-                out.campos_alterados = True
-            else:
-                s.stage = Stage.COLETA_CEP
-                s.ultima_pergunta = "cep"
-                out.pendencias.append(AskField(campo="cep", motivo="formato inválido"))
-        else:
-            out.campos_alterados = True
-            s.cep = cep8
-            s.cep_info = None
-            s.cep_confirmado = False
-            s.cep_ausente = False
-            s.stage = Stage.CONFIRMA_CEP
+    cep8 = rules.normalize_cep(e.cep) if e.cep is not None else None
+    # A pergunta pendente é o CEP? É por turno, não por mensagem com "cep" dentro: o lead que
+    # responde outra coisa também consumiu uma tentativa (foi assim que o s07a virou loop).
+    pergunta_era_cep = (
+        s.stage is Stage.COLETA_CEP or s.ultima_pergunta == "cep"
+    ) and e.intent not in _INTENTS_QUE_NAO_RESPONDEM
+
+    if cep8 is not None:
+        out.campos_alterados = True
+        s.cep = cep8
+        s.cep_info = None
+        s.cep_confirmado = False
+        s.cep_confirmacao_pedida = False
+        s.cep_ausente = False
+        s.cep_neutros = 0
+        s.stage = Stage.CONFIRMA_CEP
     elif e.intent is Intent.CONFIRMAR and s.stage is Stage.CONFIRMA_CEP:
         s.cep_confirmado = True
         out.campos_alterados = True
     elif e.intent is Intent.NEGAR and s.stage is Stage.CONFIRMA_CEP:
-        s.cep_tentativas += 1
         s.cep = None
         s.cep_info = None
         s.cep_confirmado = False
+        s.cep_confirmacao_pedida = False
         out.campos_alterados = True
-        if s.cep_tentativas > _p("tools.policy.max_cep_tentativas"):
-            s.cep_ausente = True
-        else:
-            s.stage = Stage.COLETA_CEP
-            s.ultima_pergunta = "cep"
-            out.pendencias.append(
-                AskField(campo="cep", motivo="lead disse que o CEP está errado; pedir de novo")
-            )
-    elif e.intent is Intent.NAO_SEI and (
-        s.stage is Stage.COLETA_CEP or s.ultima_pergunta == "cep"
-    ):
+        _falhou_o_cep(s, out, "lead disse que o CEP está errado; pedir de novo")
+    elif e.intent is Intent.NAO_SEI and (s.stage is Stage.COLETA_CEP or s.ultima_pergunta == "cep"):
         s.cep_ausente = True
         out.campos_alterados = True
+    elif e.cep is not None or (pergunta_era_cep and s.cep is None and not s.cep_ausente):
+        motivo = "formato inválido" if e.cep is not None else "o lead não mandou o CEP; pedir de novo"
+        _falhou_o_cep(s, out, motivo)
 
     if e.plano_id is not None:
         out.campos_alterados = out.campos_alterados or s.plano_id != e.plano_id
         s.plano_id = e.plano_id
         s.plano_assumido = False   # escolha do lead vence o padrão assumido antes
 
-    if e.data_inicio is not None and not e.data_vaga:
-        violacao = rules.validate_data_inicio(e.data_inicio) if pre_validacao else None
-        if violacao is not None:
-            out.avisos.append(SendText(text=_t("policy.txt_data_passada")))
-        else:
-            out.campos_alterados = out.campos_alterados or s.data_inicio != e.data_inicio
-            s.data_inicio = e.data_inicio
-
+    _absorver_data(s, e, rules, out, pre_validacao)
     return out
+
+
+def _falhou_o_cep(s: LeadState, out: _Absorcao, motivo: str) -> None:
+    """Mais um turno sem CEP válido. No teto, cota sem CEP e DIZ isso — nada de pedir de novo."""
+    s.cep_tentativas += 1
+    if s.cep_tentativas >= int(_p("tools.policy.max_cep_tentativas")):
+        s.cep_ausente = True
+        out.campos_alterados = True
+        out.avisos.append(SendText(text=_t("policy.txt_cep_ausente")))
+        return
+    s.stage = Stage.COLETA_CEP
+    s.ultima_pergunta = "cep"
+    out.pendencias.append(AskField(campo="cep", motivo=motivo))
+
+
+def _absorver_confirmacao_neutra(s: LeadState, intent: Intent) -> None:
+    """Resposta neutra à confirmação do CEP: na 2ª, dá o CEP por bom e segue.
+
+    Repetir "é aí que o carro fica?" três vezes é o mesmo beco do CEP inválido, com outro nome.
+    """
+    if intent in (Intent.CONFIRMAR, Intent.NEGAR):
+        return
+    s.cep_neutros += 1
+    if s.cep_neutros >= 2:
+        s.cep_confirmado = True
+
+
+def _como_data(valor: Any) -> date | None:
+    """`data_inicio` pode chegar como `date` (pydantic) ou como string (store externo, replay)."""
+    if isinstance(valor, date):
+        return valor
+    if isinstance(valor, str):
+        try:
+            return date.fromisoformat(valor.strip()[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _absorver_data(
+    s: LeadState, e: Extraction, rules: Rules, out: _Absorcao, pre_validacao: bool
+) -> None:
+    """Data de início: valor explícito, data no passado (avisa e re-pergunta) ou "tanto faz"."""
+    data = _como_data(e.data_inicio)
+    if data is not None and not e.data_vaga:
+        violacao = rules.validate_data_inicio(data) if pre_validacao else None
+        if violacao is None:
+            out.campos_alterados = out.campos_alterados or s.data_inicio != data
+            s.data_inicio = data
+            s.data_assumida = False
+            return
+        # "quero que comece ontem": avisa E pergunta de novo (antes sumia em silêncio).
+        out.avisos.append(SendText(text=_t("policy.txt_data_passada")))
+        s.stage = Stage.COLETA_DATA
+        s.ultima_pergunta = "data_inicio"
+        s.data_perguntada = True
+        out.pendencias.append(
+            AskField(campo="data_inicio", motivo="a data que o lead deu já passou; peça outra")
+        )
+        return
+
+    vago = e.data_vaga or (e.intent is Intent.NAO_SEI and s.ultima_pergunta == "data_inicio")
+    if vago and s.data_inicio is None and not s.data_assumida:
+        _assumir_data(s)
+        out.campos_alterados = True
 
 
 # --------------------------------------------------------------------------- veículos
@@ -514,8 +685,21 @@ def _assumir_plano(s: LeadState, rules: Rules) -> bool:
     padrao = str(_p("tools.policy.plano_padrao"))
     if padrao not in ids:
         padrao = ids[0]
-    s.plano_id = padrao  # type: ignore[assignment]  # validado contra os ids do /planos
+    s.plano_id = padrao
     s.plano_assumido = True
+    return True
+
+
+def _plano_valido(s: LeadState, rules: Rules) -> bool:
+    """O plano guardado ainda existe no `/planos` corrente? (o catálogo muda no meio da conversa)."""
+    return s.plano_id is not None and s.plano_id in rules.plano_ids()
+
+
+# --------------------------------------------------------------------------- data de início
+def _assumir_data(s: LeadState) -> bool:
+    """O lead não quis escolher: vigência a partir de hoje, e a apresentação diz isso."""
+    s.data_assumida = True
+    s.data_perguntada = True
     return True
 
 
@@ -530,11 +714,12 @@ def _resolver_cep(s: LeadState) -> list[Action] | None:
         s.cep_confirmado = True
         return None
     if info.existe:
+        s.cep_confirmacao_pedida = True
         return [ConfirmCep(cep=s.cep or info.cep, cidade=info.cidade or "", uf=info.uf or "")]
 
     s.cep_tentativas += 1
-    if s.cep_tentativas > _p("tools.policy.max_cep_tentativas"):
-        s.cep_confirmado = True  # segue com o CEP como está
+    if s.cep_tentativas >= int(_p("tools.policy.max_cep_tentativas")):
+        s.cep_confirmado = True  # segue com o CEP como está (o formato é válido; o ViaCEP é que não achou)
         return None
     s.stage = Stage.COLETA_CEP
     s.ultima_pergunta = "cep"
@@ -556,6 +741,10 @@ def _campo_faltante(s: LeadState) -> CampoColeta | None:
         return "veiculo"
     if s.cep is None and not s.cep_ausente:
         return "cep"
+    # A data é o ÚLTIMO campo: sem perguntá-la, o pro-rata do primeiro mês aparecia na cotação
+    # sem que ninguém tivesse falado de data ("pro-rata fantasma" da auditoria).
+    if s.data_inicio is None and not s.data_assumida:
+        return "data_inicio"
     return None
 
 
@@ -584,7 +773,19 @@ def _fluxo(s: LeadState, rules: Rules, today: date, contexto: str | None = None)
         if campo == "plano":
             s.plano_perguntado = True
             return [AskPlan(planos=rules.planos_resumo())]
+        if campo == "data_inicio":
+            s.data_perguntada = True
         return [AskField(campo=campo, motivo=contexto or _contexto_da_pergunta(s, campo))]
+
+    # O plano guardado pode ter sumido do catálogo (o `/planos` é relido a cada TTL): perguntar
+    # de novo é melhor que mandar um `plano_id` que a API vai recusar com 422.
+    if not _plano_valido(s, rules):
+        s.plano_id = None
+        s.plano_assumido = False
+        s.plano_perguntado = True
+        s.stage = Stage.ESCOLHA_PLANO
+        s.ultima_pergunta = "plano"
+        return [AskPlan(planos=rules.planos_resumo())]
 
     s.stage = Stage.COTANDO
     s.quote_result = None  # cotação nova: o resultado antigo não vale mais
@@ -602,7 +803,35 @@ def _fluxo(s: LeadState, rules: Rules, today: date, contexto: str | None = None)
         )
         for veiculo in s.veiculos
     ]
+    # Última checagem antes de gastar a chamada (o que a docstring de `models.py` sempre prometeu).
+    # Com a pré-validação local desligada no Studio, quem julga é a API — e só ela.
+    if bool(_p("tools.rules.pre_validacao_local")):
+        violacoes = [v for req in requests for v in rules.validate_request(req)]
+        if violacoes:
+            return _corrigir_antes_de_cotar(s, violacoes[0])
     return [DoQuotes(requests=requests)]
+
+
+def _corrigir_antes_de_cotar(s: LeadState, violacao: Any) -> list[Action]:
+    """Inconsistência que sobrou até o `QuoteRequest`: apaga o valor e pergunta de novo.
+
+    Nunca deveria acontecer (a absorção já valida campo a campo); se acontecer, o lead recebe
+    uma pergunta em vez de um 422 na cara.
+    """
+    campo = _CAMPO_DA_VIOLACAO.get(violacao.campo, "idade")
+    if violacao.campo == "idade":
+        s.idade = None
+    elif violacao.campo == "cep":
+        s.cep = None
+        s.cep_info = None
+        s.cep_confirmado = False
+        s.cep_confirmacao_pedida = False
+    elif violacao.campo == "data_inicio":
+        s.data_inicio = None
+        s.data_assumida = False
+    s.stage = _STAGE_DO_CAMPO[campo]
+    s.ultima_pergunta = campo
+    return [AskField(campo=campo, motivo=violacao.motivo)]
 
 
 # --------------------------------------------------------------------------- pós-cotação
@@ -620,8 +849,16 @@ def _pos_cotacao(s: LeadState) -> tuple[LeadState, list[Action]]:
     if any(v.quote_result.outcome is QuoteOutcome.OK for v in cotados):
         s.stage = Stage.APRESENTADO
         if len(cotados) == 1:
-            return s, [Present(result=cotados[0].quote_result, cep_ausente=s.cep_ausente)]
-        return s, [PresentMany(resultados=cotados, cep_ausente=s.cep_ausente)]
+            return s, [
+                Present(
+                    result=cotados[0].quote_result,
+                    cep_ausente=s.cep_ausente,
+                    data_assumida=s.data_assumida,
+                )
+            ]
+        return s, [
+            PresentMany(resultados=cotados, cep_ausente=s.cep_ausente, data_assumida=s.data_assumida)
+        ]
 
     if any(v.quote_result.outcome is QuoteOutcome.BUG for v in cotados):
         return _handoff(s, HandoffReason.ERRO_INTERNO)
@@ -655,6 +892,14 @@ def _pos_apresentacao(
     if abs_.campos_alterados:
         return s, abs_.avisos + _fluxo(s, rules, today)
 
+    # "quero ver outro plano" sem dizer qual: mostra a vitrine. Antes o lead ouvia "você já está
+    # nesse plano", que é resposta a uma pergunta que ele não fez.
+    if e.intent is Intent.ESCOLHER_PLANO and e.plano_id is None:
+        s.stage = Stage.ESCOLHA_PLANO
+        s.ultima_pergunta = "plano"
+        s.plano_perguntado = True
+        return s, abs_.avisos + [AskPlan(planos=rules.planos_resumo())]
+
     if e.intent is Intent.ESCOLHER_PLANO:
         return s, abs_.avisos + [Reply(directive=_t("policy.diretiva_mesmo_plano"))]
     return s, abs_.avisos + [Reply(directive=_t("policy.diretiva_pos_cotacao"))]
@@ -678,8 +923,21 @@ def _dados_coletados(s: LeadState) -> dict[str, Any]:
         "cep_uf": s.cep_info.uf if s.cep_info else None,
         "cep_ausente": s.cep_ausente,
         "plano_id": s.plano_id,
-        "data_inicio": s.data_inicio.isoformat() if s.data_inicio else None,
+        # A data que FOI para a API, não o campo vazio: o consultor precisa emitir com a mesma
+        # vigência que gerou o preço (era isso que saía `null` com `request.data_inicio` preenchido).
+        "data_inicio": _data_enviada(s),
+        "data_assumida": s.data_assumida,
     }
+
+
+def _data_enviada(s: LeadState) -> str | None:
+    """A `data_inicio` do último request feito; sem cotação nenhuma, o que o lead informou."""
+    for veiculo in s.veiculos:
+        if veiculo.quote_result is not None:
+            return veiculo.quote_result.request.data_inicio
+    if s.quote_result is not None:
+        return s.quote_result.request.data_inicio
+    return s.data_inicio.isoformat() if s.data_inicio else None
 
 
 def _payload_handoff(s: LeadState, reason: HandoffReason) -> dict[str, Any]:
