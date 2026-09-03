@@ -3,6 +3,7 @@ from pathlib import Path
 
 from agent.models import CepInfo
 from agent.observability import ConversationLogger
+from agent.pii import nome_arquivo_log
 
 
 def _read_lines(path: Path) -> list[dict]:
@@ -61,3 +62,63 @@ def test_event_append_grava_multiplas_linhas(tmp_path):
     linhas = _read_lines(tmp_path / "conv-5.jsonl")
     assert len(linhas) == 2
     assert [l["message_id"] for l in linhas] == ["m1", "m2"]
+
+
+# --------------------------------------------------------------------------- nome do arquivo (PII)
+def test_conversa_de_whatsapp_nao_leva_o_telefone_para_o_nome_do_arquivo(tmp_path):
+    logger = ConversationLogger(tmp_path, "wa-5511999990000")
+    logger.event("inbound", message_id="m1", text="oi")
+
+    nomes = [p.name for p in tmp_path.iterdir()]
+    assert nomes == [f"{nome_arquivo_log('wa-5511999990000')}.jsonl"]
+    assert "5511999990000" not in nomes[0]
+    # o id INTERNO não muda: é o que o takeover e o Atendimentos usam
+    assert _read_lines(logger.path)[0]["conversation_id"] == "wa-5511999990000"
+
+
+def test_arquivo_antigo_com_o_numero_em_claro_continua_sendo_o_da_conversa(tmp_path):
+    """Nada de partir uma conversa em dois arquivos por causa da mudança de nome."""
+    legado = tmp_path / "wa-5511999990000.jsonl"
+    legado.write_text('{"event": "inbound"}\n', encoding="utf-8")
+
+    ConversationLogger(tmp_path, "wa-5511999990000").event("outbound", text="oi de volta")
+
+    assert len(_read_lines(legado)) == 2
+    assert not (tmp_path / f"{nome_arquivo_log('wa-5511999990000')}.jsonl").exists()
+
+
+def test_nome_de_arquivo_explicito_manda(tmp_path):
+    """Quem já tem o nome hasheado (o canal, um exportador) passa pronto."""
+    logger = ConversationLogger(tmp_path, "wa-5511999990000", "wa-fixo")
+    logger.event("inbound")
+    assert logger.path == tmp_path / "wa-fixo.jsonl"
+
+
+def test_cli_e_lab_continuam_com_o_nome_de_sempre(tmp_path):
+    ConversationLogger(tmp_path, "cli-1788350261").event("inbound")
+    assert (tmp_path / "cli-1788350261.jsonl").exists()
+
+
+# --------------------------------------------------------------------------- campos livres
+def test_event_grava_qualquer_campo_inclusive_in_reply_to(tmp_path):
+    """`in_reply_to` é o campo que faltava no `outbound` (README §5 promete e o log não tinha).
+
+    O logger nunca filtrou campo nenhum — quem precisa mudar é o emissor. Ver o reporte:
+    `conversation.py:376` passa a mandar `in_reply_to=out.in_reply_to`.
+    """
+    logger = ConversationLogger(tmp_path, "conv-6")
+    logger.event("outbound", message_id="m1-o1", text="oi", source="template", in_reply_to="m1")
+
+    linha = _read_lines(tmp_path / "conv-6.jsonl")[0]
+    assert linha["data"] == {"text": "oi", "source": "template", "in_reply_to": "m1"}
+
+
+def test_event_aceita_os_eventos_novos_do_kind(tmp_path):
+    logger = ConversationLogger(tmp_path, "conv-7")
+    for kind in ("llm_retry", "llm_error", "llm_guard", "planos_refresh",
+                 "outbound_suprimido", "takeover_expirado", "extraction_regex"):
+        logger.event(kind, motivo="x")
+    assert [l["event"] for l in _read_lines(tmp_path / "conv-7.jsonl")] == [
+        "llm_retry", "llm_error", "llm_guard", "planos_refresh",
+        "outbound_suprimido", "takeover_expirado", "extraction_regex",
+    ]

@@ -7,6 +7,7 @@ do `/planos`, logger). Só troca o canal: aqui é o webhook Evolution, lá era o
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 
 import uvicorn
@@ -17,6 +18,16 @@ from agent.config import settings
 from agent.handoff import HandoffNotifier
 from agent.runtime_config import CONFIG_DIR
 from agent.takeover import TakeoverStore
+
+
+def _calar_avisos_do_sdk() -> None:
+    """O google-genai loga um WARNING de AFC (automatic function calling) por chamada.
+
+    São dezenas de linhas por conversa dizendo o óbvio (`AFC is enabled with max remote
+    calls: 10`), no meio dos logs do canal. O silêncio é do LOGGER dele, não do nosso:
+    erro de verdade do SDK continua aparecendo.
+    """
+    logging.getLogger("google_genai.models").setLevel(logging.ERROR)
 
 
 def _exigir_settings() -> None:
@@ -39,6 +50,7 @@ def _exigir_settings() -> None:
 
 
 def run() -> int:
+    _calar_avisos_do_sdk()
     try:
         _exigir_settings()
         sender = EvolutionSender(

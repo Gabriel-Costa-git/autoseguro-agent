@@ -373,6 +373,11 @@ EventKind = Literal[
     "inbound", "outbound", "extraction", "decision",
     "quote_attempt", "quote_result", "cep_lookup",
     "llm_call", "tool_call", "handoff", "handoff_notice", "refusal", "error",
+    # F11 — o que o log escondia: retry/erro do LLM, guardrail que apagou preço, refresh
+    # do /planos, saída que o canal NÃO entregou, takeover devolvido por inatividade e
+    # campo que veio da regex de fallback em vez do modelo.
+    "llm_retry", "llm_error", "llm_guard", "planos_refresh",
+    "outbound_suprimido", "takeover_expirado", "extraction_regex",
 ]
 
 

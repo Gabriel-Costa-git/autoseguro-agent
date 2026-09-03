@@ -105,6 +105,15 @@ def test_index_tem_a_aba_tools_reorganizada(client: TestClient):
     assert 'id="config-tools-cards"' in resp.text
 
 
+def test_app_js_tem_a_ficha_do_canal(client: TestClient):
+    """`tools.canal` (os freios do WhatsApp) precisa estar em Integrações: sem o grupo na
+    lista e sem a ficha, os dois parâmetros existem na API e não têm onde ser mexidos."""
+    app_js = client.get("/static/app.js").text
+    assert '"quote_client", "viacep", "handoff", "canal"' in app_js
+    for campo in ("max_respostas_por_minuto", "debounce_s", "auto_devolver_apos_min"):
+        assert campo in app_js
+
+
 def test_app_js_tem_a_ficha_de_handoff(client: TestClient):
     """A ficha de `tools.handoff` e o evento `handoff_notice` são desenhados por JS (não há id
     fixo no HTML), então o que dá para travar aqui é o app.js servido trazer os dois."""

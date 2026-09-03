@@ -8,10 +8,32 @@ arquivo pela metade.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 
 from agent.takeover import TakeoverStore
+from tests.fakes import FakeLogger, logger_factory_unico
 
 CID = "wa-5511999990000"
+
+T0 = datetime(2026, 9, 3, 12, 0, tzinfo=UTC)
+
+
+class _Loja:
+    """`ConfigStore` mínimo: só `tools.handoff.auto_devolver_apos_min` interessa aqui."""
+
+    def __init__(self, minutos: int | None = 240) -> None:
+        self.minutos = minutos
+
+    def param(self, path: str):
+        assert path == "tools.handoff.auto_devolver_apos_min"
+        return self.minutos
+
+
+def _relogio(instantes: list[datetime]):
+    """Relógio que anda pela lista: a última hora fica valendo para as chamadas seguintes."""
+    def agora() -> datetime:
+        return instantes[0] if len(instantes) == 1 else instantes.pop(0)
+    return agora
 
 
 def test_arquivo_ausente_e_mapa_vazio(tmp_path):
@@ -53,7 +75,8 @@ def test_arquivo_no_disco_tem_o_formato_do_contrato(tmp_path):
     TakeoverStore(tmp_path).assumir(CID)
     dados = json.loads((tmp_path / "atendimentos.json").read_text(encoding="utf-8"))
     assert list(dados) == [CID]
-    assert set(dados[CID]) == {"modo", "desde"}
+    assert set(dados[CID]) == {"modo", "desde", "por", "ultima_humana"}
+    assert dados[CID]["por"] == "operador"      # o padrão é o clique do operador
 
 
 def test_hot_reload_ve_edicao_externa(tmp_path):
@@ -90,4 +113,71 @@ def test_listar_devolve_copia(tmp_path):
     loja.assumir(CID)
     mapa = loja.listar()
     mapa.clear()
+    assert loja.is_humano(CID) is True
+
+
+# --------------------------------------------------------------------------- devolução automática
+def _store(tmp_path, agora, minutos=240, logger=None) -> TakeoverStore:
+    return TakeoverStore(
+        tmp_path,
+        store=_Loja(minutos),
+        logger_factory=logger_factory_unico(logger) if logger is not None else None,
+        log_dir=tmp_path,
+        agora=agora,
+    )
+
+
+def test_takeover_automatico_expira_e_volta_para_o_agente(tmp_path):
+    """Handoff que ninguém foi atender não pode deixar o lead falando sozinho para sempre."""
+    logger = FakeLogger(tmp_path, CID)
+    loja = _store(tmp_path, _relogio([T0, T0 + timedelta(minutes=241)]), logger=logger)
+    loja.assumir(CID, automatico=True)
+
+    assert loja.is_humano(CID) is False              # passou de 240 min
+    assert loja.listar() == {}                       # devolvida de fato, não só ignorada
+
+    evento = next(e for e in logger.eventos() if e["event"] == "takeover_expirado")
+    assert evento["data"]["por"] == "agente"
+    assert evento["data"]["minutos"] == 240
+
+
+def test_takeover_automatico_dentro_do_prazo_continua_humano(tmp_path):
+    loja = _store(tmp_path, _relogio([T0, T0 + timedelta(minutes=239)]))
+    loja.assumir(CID, automatico=True)
+    assert loja.is_humano(CID) is True
+
+
+def test_takeover_do_operador_nunca_expira(tmp_path):
+    """Quem clicou em Assumir sabe o que fez; pode estar só demorando para responder."""
+    loja = _store(tmp_path, _relogio([T0, T0 + timedelta(days=30)]))
+    loja.assumir(CID)
+    assert loja.is_humano(CID) is True
+
+
+def test_mensagem_humana_reinicia_o_relogio(tmp_path):
+    loja = _store(tmp_path, _relogio([T0, T0 + timedelta(minutes=200), T0 + timedelta(minutes=400)]))
+    loja.assumir(CID, automatico=True)
+    loja.registrar_humano(CID)                       # o operador respondeu aos 200 min
+    assert loja.is_humano(CID) is True               # aos 400, faz 200 desde a última humana
+
+
+def test_registrar_humano_em_conversa_nao_assumida_nao_faz_nada(tmp_path):
+    loja = _store(tmp_path, _relogio([T0]))
+    assert loja.registrar_humano(CID) == {}
+    assert not (tmp_path / "atendimentos.json").exists()
+
+
+def test_sem_parametro_de_devolucao_nada_expira(tmp_path):
+    """`auto_devolver_apos_min` vazio = comportamento entregue (takeover é para sempre)."""
+    loja = _store(tmp_path, _relogio([T0, T0 + timedelta(days=365)]), minutos=None)
+    loja.assumir(CID, automatico=True)
+    assert loja.is_humano(CID) is True
+
+
+def test_entrada_antiga_sem_o_campo_por_nao_expira(tmp_path):
+    """Arquivo escrito antes desta versão: sem `por`, trata como operador (conservador)."""
+    (tmp_path / "atendimentos.json").write_text(
+        json.dumps({CID: {"modo": "humano", "desde": "2020-01-01T00:00:00+00:00"}}), encoding="utf-8"
+    )
+    loja = _store(tmp_path, _relogio([T0]))
     assert loja.is_humano(CID) is True
