@@ -2,7 +2,7 @@
 `Rules` recalculadas com o `today()` de AGORA.
 
 Duas coisas estragam regra derivada e nenhuma delas aparece em teste de unidade comum: um
-`/planos` que muda com o processo no ar (a auditoria viu o agente oferecendo um plano que a
+`/planos` que muda com o processo no ar (em revisão vimos o agente oferecendo um plano que a
 API já não aceitava) e um processo que atravessa a virada do ano com o `today` do boot
 congelado. Os testes aqui são justamente sobre o tempo passando.
 """

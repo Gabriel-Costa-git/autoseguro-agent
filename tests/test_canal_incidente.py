@@ -5,7 +5,7 @@ mandar um `messages.upsert` de protocolo (recibo) a cada ~3 s logo depois de cad
 nosso — sem `fromMe`, sem `pushName`, sem `conversation`. O `parse_webhook` transformava
 cada um em turno; o estado terminal respondia o mesmo template a todos.
 
-Os `message_id` abaixo são os do incidente (`log de produção (não versionado)`);
+Os `message_id` abaixo são os do incidente real de 02/09 (log de produção, não versionado);
 o telefone real foi trocado por `5511999990000`. Nada aqui toca a rede: transporte mockado
 no sender, `ASGITransport` no app e um dublê de `Conversation`.
 """

@@ -212,7 +212,7 @@ def test_caminho_feliz_turno_a_turno():
     assert acoes == [ConfirmCep(cep="01001000", cidade="São Paulo", uf="SP")]
 
     # A data é o ÚLTIMO campo da coleta: sem ela, o pro-rata do 1º mês apareceria sem ninguém
-    # ter falado de data (o "pro-rata fantasma" da auditoria).
+    # ter falado de data (o "pro-rata fantasma").
     s, acoes = _act(s, _extr(intent=Intent.CONFIRMAR))
     assert acoes == [AskField(campo="data_inicio", motivo=None)]
     assert s.stage is Stage.COLETA_DATA and s.data_perguntada is True
@@ -293,7 +293,7 @@ def test_cep_invalido_no_teto_segue_sem_cep_avisando():
 
 
 def test_resposta_que_nao_traz_cep_tambem_conta_tentativa():
-    """Cenário s07a da auditoria: "123", "abc" e depois "essencial" — e o agente cotava o CEP 3x."""
+    """Dois CEPs inválidos e depois o plano: "123", "abc", "essencial" — e o agente pedia o CEP uma 3x."""
     s = _state(idade=35, veiculo_texto="Onix 2020", veiculo_ano=2020, veiculos=[
         VeiculoColetado(texto="Onix 2020", ano=2020)
     ], stage=Stage.COLETA_CEP, ultima_pergunta="cep")
@@ -427,7 +427,7 @@ def test_midia_sem_texto_pede_texto():
 
 
 def test_midia_repetida_muda_o_texto_e_na_terceira_chama_gente():
-    """Insistir no MESMO pedido três vezes é o beco que a auditoria achou no s12."""
+    """Insistir no MESMO pedido três vezes é um beco: o lead que só manda "oi", "hm", "?"."""
     s = _state()
     s, acoes = _act(s, None)
     assert acoes[0] == SendText(text=TXT_MIDIA)

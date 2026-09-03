@@ -11,7 +11,7 @@ O exportador é um conjunto de regras, não uma cópia:
    ou de um workspace irmão de mesmo nome-base. Sessões com menos de
    `MIN_LINHAS` linhas ou inteiramente fora da janela `[1º commit − 2 h, agora]`
    ficam de fora.
-2. **Nomes de saída neutros** — `orquestrador/`, `executor-<n>/`, `outro/`.
+2. **Nomes de saída neutros** — `orquestrador/`, `executor-<n>/`.
    Nenhum caminho ou nome de máquina do autor vira nome de pasta.
 3. **Uma linha JSON entra, uma linha JSON sai** — `json.loads` → transformação
    nos valores → `json.dumps`. A máscara de PII nunca toca a linha crua (era o
@@ -66,7 +66,7 @@ MARCA_BASE64 = "[binário removido: blob base64]"
 # Âncoras de conteúdo: redigir pelo que o texto É, não pelo caminho de onde veio.
 # O mesmo arquivo pessoal chegou aos transcripts por três caminhos (leitura direta,
 # `cat` de um dump intermediário e leitura desse dump), então o path não basta.
-ANCORA_CONFIG_PESSOAL = "protocolo de orquestração (Gabriel)"
+ANCORA_CONFIG_PESSOAL = "protocolo de orquestração ("
 ANCORA_MEMORIA_INICIO = "---"
 ANCORA_MEMORIA_CAMPOS = ("name:", "metadata:")
 
@@ -109,7 +109,7 @@ def _slug(caminho: Path) -> str:
 def descobrir_workspaces(repo: Path) -> list[Path]:
     """Só o workspace do repositório: o que aconteceu nele (orquestrador) e nas suas
     subpastas ocultas (executores). Sessões de outros workspaces não são deste
-    projeto e ficam fora — ficam fora."""
+    projeto e ficam fora."""
     return [repo.parent]
 
 

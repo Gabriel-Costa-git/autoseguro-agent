@@ -134,7 +134,7 @@ def test_regras_de_caminho_trocam_repo_worktree_scratch_e_home(tmp_path):
 # --------------------------------------------------------------------------- redações por conteúdo
 def test_ancora_de_config_pessoal_apaga_o_campo_inteiro():
     hig = _hig()
-    texto = "1\t# Modo X — protocolo de orquestração (Gabriel)\n2\tregra 1\n3\tregra 2\n"
+    texto = "1\t# Modo X — protocolo de orquestração (autor)\n2\tregra 1\n3\tregra 2\n"
     assert hig.texto(texto) == MARCA_PESSOAL
     assert hig.counts["config_pessoal"] == 1
 
@@ -377,7 +377,7 @@ def test_check_logs_detecta_literal_da_denylist_e_ancora(tmp_path):
     ai_logs = tmp_path / "ai-logs"
     ai_logs.mkdir()
     (ai_logs / "a.md").write_text("host sub.exemplo.com\n", encoding="utf-8")
-    (ai_logs / "b.md").write_text("# Modo X — protocolo de orquestração (Gabriel)\n", encoding="utf-8")
+    (ai_logs / "b.md").write_text("# Modo X — protocolo de orquestração (autor)\n", encoding="utf-8")
 
     assert check_logs(ai_logs, segredos=[], denylist=["sub.exemplo.com"]) == 1
 

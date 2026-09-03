@@ -744,7 +744,7 @@ def _campo_faltante(s: LeadState) -> CampoColeta | None:
     if s.cep is None and not s.cep_ausente:
         return "cep"
     # A data é o ÚLTIMO campo: sem perguntá-la, o pro-rata do primeiro mês aparecia na cotação
-    # sem que ninguém tivesse falado de data ("pro-rata fantasma" da auditoria).
+    # sem que ninguém tivesse falado de data ("pro-rata fantasma": pro-rata sem ninguém ter falado de data).
     if s.data_inicio is None and not s.data_assumida:
         return "data_inicio"
     return None

@@ -1,4 +1,4 @@
-"""Invariantes da máquina de estados: os becos sem saída que a auditoria achou, agora como teste.
+"""Invariantes da máquina de estados: os becos sem saída encontrados em revisão, agora como teste.
 
 Os testes de `test_policy.py` provam roteiros ("o lead diz X, o agente responde Y"). Estes
 provam propriedades de TODOS os estados, que é onde os becos moram: um estágio de onde nenhuma
