@@ -1,12 +1,9 @@
 # fluxo_cep_invalido
 lead: tenho 35 anos
-  agente [template]: Tenho três planos. Olha o que cada um cobre:
-
-    *Essencial* — franquia de R$ 4.500,00. Cobre colisão, roubo e furto.
-    *Completo* — franquia de R$ 3.000,00. Cobre colisão, roubo, furto, danos a terceiros e vidros.
-    *Premium* — franquia de R$ 1.500,00. Cobre colisão, roubo, furto, danos a terceiros, vidros e carro reserva.
-
-    Qual deles quer que eu cote pra você?
+  agente [template]: *Essencial* — colisão, roubo e furto · franquia R$ 4.500,00
+    *Completo* — colisão, roubo, furto, danos a terceiros e vidros · franquia R$ 3.000,00
+    *Premium* — colisão, roubo, furto, danos a terceiros, vidros e carro reserva · franquia R$ 1.500,00
+    Qual deles quer cotar?
 lead: o essencial
   agente [template]: Qual o modelo e o ano de fabricação do carro?
 lead: Onix 2019
@@ -17,15 +14,11 @@ lead: abc
   agente [template]: Sem problema, sigo sem o CEP — só saiba que o valor pode variar um pouco quando a gente confirmar a região.
   agente [template]: Quer que o seguro comece hoje ou em outra data?
 lead: hoje
-  agente [template]: Cotei aqui o plano *Essencial*:
-
-    • *R$ 209,90/mês*
-    • Franquia de R$ 3.000,00
-    • Cobre colisão, roubo, furto, danos a terceiros e vidros
-
-    Importante: roubo e furto só passam a valer 30 dias depois do início da vigência (carência).
-    Como não tenho seu CEP, esse valor é uma estimativa e pode subir quando a gente confirmar a região.
-
-    Quer fechar? Um consultor finaliza com você. Ou prefere ver outro plano?
+  agente [template]: *Essencial* — R$ 209,90/mês
+    Franquia: R$ 3.000,00
+    Cobre: colisão, roubo, furto, danos a terceiros e vidros
+    Carência: roubo e furto só valem 30 dias depois do início da vigência.
+    Sem o CEP, esse valor é estimativa e pode subir quando a gente confirmar a região.
+    Quer fechar com um consultor ou prefere ver outro plano?
 
 estado: stage=apresentado handoff=- cep_ausente=True data_assumida=False chamadas_extractor=6
