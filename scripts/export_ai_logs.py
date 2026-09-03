@@ -57,13 +57,32 @@ IMAGEM_MIN_BYTES = 2048
 REDACTED = "<REDACTED>"
 MARCA_DENYLIST = "[redigido]"
 MARCA_PESSOAL = "[redigido: arquivo pessoal de configuração, fora do escopo do desafio]"
-MARCA_OPERACIONAL = "[redigido]"
-# Assinaturas que só aparecem em texto de ferramenta.
 MARCA_FERRAMENTA = "[redigido: comando ou saída da ferramenta de orquestração de terminais]"
-# Comandos da ferramenta de orquestração e o que ela devolve (lista de terminais, checks, asks):
-# são o encanamento entre terminais, não conversa com IA. Ficam fora, com marcador à vista.
-_FERRAMENTA_RE = re.compile(r"\borq\s+(list|check|ask|recruit|dismiss|note|connect|role|preset|portal)\b|orquestrador:\s*true|Connected agents:|You:\s*-\s*name:|\bRecruited\s+\"|\bDismissed\s+\"|\bReplaced\s+\"|role \"Executor|recrutar Executor|Executor (UI|Backend)\b")
-_OPERACIONAL_RE = re.compile(r"^\s*[—-]?\s*(?:confirmando\s+)?\(operador\)|^\s*Ordem\s+—\s+GO\b")
+# Assinaturas da ferramenta local de orquestração de terminais (comandos, listas de terminais,
+# textos que ela injeta no prompt). Ficam num arquivo FORA do repo, uma regex por linha, como a
+# denylist: o que casa `_assinaturas_ferramenta()` vira marcador (strings) ou é descartado
+# (mensagem `user` inteira injetada), porque é encanamento entre terminais, não conversa com IA.
+ASSINATURAS_PADRAO = Path.home() / "workspace" / "scrub-assinaturas.txt"
+
+
+def _assinaturas_ferramenta(caminho: Path | None = None) -> tuple[re.Pattern[str] | None, re.Pattern[str] | None]:
+    """(regex de string, regex de mensagem inteira) lidas do arquivo; `None` se não existir."""
+    arq = caminho or ASSINATURAS_PADRAO
+    if not arq.is_file():
+        return None, None
+    str_rx, msg_rx = [], []
+    for linha in arq.read_text(encoding="utf-8").splitlines():
+        linha = linha.strip()
+        if not linha or linha.startswith("#"):
+            continue
+        if linha.startswith("msg:"):
+            msg_rx.append(linha[4:].strip())
+        else:
+            str_rx.append(linha)
+    return (re.compile("|".join(str_rx)) if str_rx else None, re.compile("|".join(msg_rx)) if msg_rx else None)
+
+
+_FERRAMENTA_RE, _OPERACIONAL_RE = _assinaturas_ferramenta()
 MARCA_IMAGEM = "[imagem removida: screenshot]"
 MARCA_BASE64 = "[binário removido: blob base64]"
 
@@ -302,7 +321,7 @@ class Higienizador:
 
     # ---- texto
     def texto(self, s: str) -> str:
-        if _FERRAMENTA_RE.search(s):
+        if _FERRAMENTA_RE is not None and _FERRAMENTA_RE.search(s):
             self.counts["ferramenta"] += 1
             return MARCA_FERRAMENTA
 
@@ -415,26 +434,28 @@ class Higienizador:
         return any(isinstance(a, str) and self._caminho_pessoal(a) for a in alvos)
 
     def _mensagem_operacional(self, obj: dict) -> dict:
-        """Mensagem `user` de ferramenta vira marcador."""
+        """Mensagem `user` que casa uma assinatura de ferramenta é descartada: não é conversa."""
         msg = obj.get("message") or {}
         c = msg.get("content")
         texto = c if isinstance(c, str) else " ".join(
             b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"
         ) if isinstance(c, list) else ""
-        if texto and _OPERACIONAL_RE.search(texto):
+        if texto and _OPERACIONAL_RE is not None and _OPERACIONAL_RE.search(texto):
             self.counts["operacional"] += 1
-            return {**obj, "message": {**msg, "content": MARCA_OPERACIONAL}}
+            return None
         return obj
 
     def linha(self, obj: Any) -> Any | None:
         if isinstance(obj, dict) and obj.get("type") == "user":
             obj = self._mensagem_operacional(obj)
+            if obj is None:
+                return None
         if isinstance(obj, dict) and obj.get("type") == "last-prompt":
             # Metadado que repete a última mensagem digitada: mesma regra da mensagem.
             lp = obj.get("lastPrompt")
-            if isinstance(lp, str) and _OPERACIONAL_RE.search(lp):
+            if isinstance(lp, str) and _OPERACIONAL_RE is not None and _OPERACIONAL_RE.search(lp):
                 self.counts["operacional"] += 1
-                obj = {**obj, "lastPrompt": MARCA_OPERACIONAL}
+                return None
         """Transforma um objeto de linha; `None` significa "não exporte esta linha"."""
         if isinstance(obj, dict):
             attachment = obj.get("attachment")
