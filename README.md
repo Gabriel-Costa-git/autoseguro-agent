@@ -218,7 +218,13 @@ valor de preço está fixo em template.
 
 ## Log de uma execução completa
 Três execuções reais (Gemini `gemini-3.5-flash-lite` + API de cotação em docker), geradas pelo
-CLI em modo roteiro e commitadas em `logs/entrega/`:
+CLI em modo roteiro e commitadas em `logs/entrega/`.
+
+> Nota de versão: estes logs foram gravados em 01/09, antes das correções da auditoria final
+> (pergunta da data de início, guard pós-LLM, `in_reply_to` e `usage` no log, respostas por canal).
+> O comportamento atual está coberto pelos goldens de fluxo em `tests/golden/fluxo_*.txt`
+> (5 roteiros ponta a ponta com o Extractor determinístico) e pelos 1019 testes. Para regravar
+> com o agente atual: `uv run python -m agent.chat --script scripts/roteiro-feliz.txt --delay 3`.
 
 | Arquivo | Cenário | Desfecho |
 |---|---|---|
