@@ -321,9 +321,10 @@ class Higienizador:
             return MARCA_PESSOAL
 
         for literal in self.denylist:
-            if literal in s:
-                self.counts["denylist"] += s.count(literal)
-                s = s.replace(literal, MARCA_DENYLIST)
+            # Sem distinguir caixa: o literal vale em qualquer grafia.
+            rx = re.compile(re.escape(literal), re.IGNORECASE)
+            s, n = rx.subn(MARCA_DENYLIST, s)
+            self.counts["denylist"] += n
 
         for rx, destino in self.regras_caminho:
             s, n = rx.subn(destino, s)
