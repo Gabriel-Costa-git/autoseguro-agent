@@ -392,7 +392,9 @@ button.loading::after {
 .lab-pane { flex: 1; min-height: 0; overflow: auto; padding: 12px; }
 .lab-pane > pre { margin: 0; font-size: 12.5px; }
 
-.bubble { max-width: 85%; padding: 8px 12px; border-radius: 10px; font-size: 13px; line-height: 1.5; }
+/* pre-wrap: a mensagem do agente chega com as quebras que o lead vê no WhatsApp */
+.bubble { max-width: 85%; padding: 8px 12px; border-radius: 10px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.bubble strong { font-weight: 600; }
 .bubble-lead { align-self: flex-end; background: var(--surface-2); border: 1px solid var(--border); }
 .bubble-agent { align-self: flex-start; background: transparent; border: 1px solid var(--border); }
 .bubble.clicavel { cursor: pointer; }

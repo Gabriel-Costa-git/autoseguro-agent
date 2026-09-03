@@ -89,6 +89,13 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
 
+/** Texto de uma bolha de chat: escapado primeiro, depois a ênfase do WhatsApp (`*texto*` → negrito).
+ *  Só asteriscos simples que abrem e fecham na MESMA linha; `**`, asterisco solto e lista `* item` ficam como
+ *  estão. As quebras de linha não viram `<br>`: quem preserva é o `white-space: pre-wrap` da `.bubble`. */
+function textoDaBolha(texto) {
+  return escapeHtml(texto ?? "").replace(/(^|[^*\w])\*([^*\n]+)\*(?![*\w])/g, "$1<strong>$2</strong>");
+}
+
 function badgeEl(texto, classe = "") {
   const span = document.createElement("span");
   span.className = "badge" + (classe ? ` ${classe}` : "");
@@ -1785,7 +1792,7 @@ function criarChat(container, opts) {
       for (const m of LabSession.mensagens) {
         const bolha = document.createElement("div");
         bolha.className = "bubble " + (m.lado === "lead" ? "bubble-lead" : "bubble-agent");
-        bolha.textContent = m.texto;
+        bolha.innerHTML = textoDaBolha(m.texto); // conteúdo já escapado por textoDaBolha
         if (m.turno) bolha.dataset.turno = m.turno;
         if (m.lado === "agent" && m.source) {
           const src = document.createElement("span");
@@ -2183,7 +2190,7 @@ const Atendimentos = {
       const source = dados.source || "";
       const bolha = document.createElement("div");
       bolha.className = "bubble " + (lead ? "bubble-lead" : "bubble-agent") + (source === "humano" ? " bubble-humano" : "");
-      bolha.textContent = dados.text || (dados.media_type ? `(mídia: ${dados.media_type})` : "");
+      bolha.innerHTML = textoDaBolha(dados.text || (dados.media_type ? `(mídia: ${dados.media_type})` : ""));
       const etiqueta = lead ? dados.sender_name || "" : source;
       if (etiqueta) {
         const src = document.createElement("span");
