@@ -220,11 +220,27 @@ async def conversar(
             roteiro.insert(0, linha)
 
 
+def _notificador_do_terminal():
+    """Aviso ao consultor também no chat de terminal, quando a Evolution está configurada.
+
+    O handoff é o mesmo do canal: o consultor recebe o resumo no WhatsApp dele. O que NÃO
+    acontece aqui é o takeover — no terminal não há operador para assumir, então o agente
+    continua respondendo. Sem `EVOLUTION_*` no `.env`, nada é enviado e o handoff só fica no log.
+    """
+    if not (settings.evolution_url and settings.evolution_apikey and settings.evolution_instance):
+        return None
+    from agent.channels.evolution import EvolutionSender
+    from agent.handoff import HandoffNotifier
+
+    sender = EvolutionSender(settings.evolution_url, settings.evolution_apikey, settings.evolution_instance)
+    return HandoffNotifier(sender=sender, takeover=None)
+
+
 async def run(script: Path | None = None, conversation_id: str | None = None, delay: float | None = None) -> int:
     # O SDK do Gemini avisa sobre AFC uma vez por processo; no terminal isso vira ruído na demo.
     logging.getLogger("google_genai.models").setLevel(logging.ERROR)
     try:
-        conv = await montar_conversa()
+        conv = await montar_conversa(on_handoff=_notificador_do_terminal())
     except BootError as exc:
         print(f"[erro] {exc}")
         return 2
