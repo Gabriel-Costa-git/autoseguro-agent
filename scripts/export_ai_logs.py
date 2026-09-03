@@ -33,6 +33,7 @@ import argparse
 import base64
 import binascii
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -62,7 +63,7 @@ MARCA_FERRAMENTA = "[redigido: comando ou saída da ferramenta de orquestração
 # textos que ela injeta no prompt). Ficam num arquivo FORA do repo, uma regex por linha, como a
 # denylist: o que casa `_assinaturas_ferramenta()` vira marcador (strings) ou é descartado
 # (mensagem `user` inteira injetada), porque é encanamento entre terminais, não conversa com IA.
-ASSINATURAS_PADRAO = Path.home() / "workspace" / "scrub-assinaturas.txt"
+ASSINATURAS_PADRAO = Path(os.environ.get("AI_LOGS_ASSINATURAS", Path.home() / ".config" / "ai-logs" / "assinaturas.txt"))
 
 
 def _assinaturas_ferramenta(caminho: Path | None = None) -> tuple[re.Pattern[str] | None, re.Pattern[str] | None]:
