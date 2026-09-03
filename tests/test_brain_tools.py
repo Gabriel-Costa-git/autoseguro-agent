@@ -76,17 +76,18 @@ def test_sem_tool_o_agent_e_o_da_entrega(loja, agentes_construidos):
 
     (kwargs,) = agentes_construidos
     assert set(kwargs) == {
-        "name", "model", "db", "instructions", "post_hooks",
-        "add_history_to_context", "num_history_runs", "markdown", "telemetry",
+        "name", "model", "db", "instructions", "post_hooks", "add_history_to_context",
+        "num_history_runs", "system_message_role", "markdown", "telemetry",
     }
     assert "tools" not in kwargs
     assert kwargs["name"] == "autoseguro-responder"
     assert kwargs["model"] == "gemini(temp=0.4)"
     assert kwargs["db"] == "sqlite-db"
     assert kwargs["instructions"] is brain._responder_instructions
-    assert kwargs["post_hooks"] == [brain._price_guard_hook]
+    assert kwargs["post_hooks"] == [brain._guard_hook]
     assert kwargs["add_history_to_context"] is True
-    assert kwargs["num_history_runs"] == 8
+    assert kwargs["num_history_runs"] == 4      # 8 mandava meia conversa em cada chamada
+    assert kwargs["system_message_role"] == "system"   # é ele que filtra o prompt antigo
     assert kwargs["markdown"] is False
     assert kwargs["telemetry"] is False
 
@@ -247,7 +248,7 @@ def _prompt(**kw) -> str:
 
 
 def _intents_do_prompt(prompt: str) -> list[str]:
-    bloco = prompt.split("intent (escolha exatamente um):\n", 1)[1]
+    bloco = prompt.split("intent (exatamente um):\n", 1)[1]
     return [linha[2:].split(":", 1)[0] for linha in bloco.splitlines() if linha.startswith("- ")]
 
 

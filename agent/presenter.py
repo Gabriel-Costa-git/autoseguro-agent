@@ -12,9 +12,15 @@ código, para que nenhuma edição de texto consiga produzir um valor errado.
 A leitura do store é feita NA CHAMADA (hot-reload no Studio).
 
 Tom: WhatsApp, pt-BR, curto, no máximo *negrito*.
+
+Formato por CANAL (`render(action, state, canal)`): os blocos são os mesmos nos três canais;
+o que muda é a marcação. No WhatsApp o `*negrito*` do rótulo é o que dá hierarquia à mensagem;
+no CLI e no Lab o asterisco seria lixo na tela, então ele cai. O canal sai do `state.origem`
+(que o `Inbound` já traz) quando ninguém passa `canal` — nenhum chamador precisa mudar.
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from agent.models import (
@@ -29,6 +35,7 @@ from agent.models import (
     PresentMany,
     Quote,
     QuoteOutcome,
+    QuoteResult,
     Refuse,
     SendText,
     VeiculoColetado,
@@ -41,14 +48,44 @@ def _t(key: str, **ctx: Any) -> str:
     return store.text(key, **ctx)
 
 
-def render(action: Action, state: LeadState) -> str:
-    """Renderiza uma ação de template. Levanta ValueError para as ações do LLM/cliente."""
+CANAIS = ("whatsapp", "cli", "lab")
+
+# `*negrito*` de rótulo: um par de asteriscos sem quebra de linha no meio.
+_NEGRITO_RE = re.compile(r"\*(\S[^*\n]*?\S|\S)\*")
+
+
+def canal_de(origem: str | None) -> str:
+    """Canal de formatação a partir de `Inbound.origem` (`whatsapp:<instância>`, `cli`, `lab`).
+
+    Origem desconhecida (ou ausente, em replay de log antigo) formata como WhatsApp: é o
+    canal do produto, e um asterisco a mais no terminal é menos grave que a mensagem chapada
+    para o lead.
+    """
+    valor = (origem or "").lower()
+    if valor.startswith("whatsapp"):
+        return "whatsapp"
+    return valor if valor in CANAIS else "whatsapp"
+
+
+def _para_canal(texto: str, canal: str) -> str:
+    return texto if canal == "whatsapp" else _NEGRITO_RE.sub(r"\1", texto)
+
+
+def render(action: Action, state: LeadState, canal: str | None = None) -> str:
+    """Renderiza uma ação de template. Levanta ValueError para as ações do LLM/cliente.
+
+    `canal` é opcional: sem ele, sai do `state.origem`.
+    """
+    return _para_canal(_texto(action, state), canal or canal_de(state.origem))
+
+
+def _texto(action: Action, state: LeadState) -> str:
     if isinstance(action, SendText):
         return action.text
     if isinstance(action, ConfirmCep):
         return _confirm_cep(action)
     if isinstance(action, AskPlan):
-        return _ask_plan(action)
+        return vitrine(action.planos)
     if isinstance(action, Present):
         return _present(action, state)
     if isinstance(action, PresentMany):
@@ -73,11 +110,16 @@ def _confirm_cep(action: ConfirmCep) -> str:
     )
 
 
-def _ask_plan(action: AskPlan) -> str:
-    linhas = [_t("presenter.ask_plan.cabecalho"), ""]
-    linhas += [_linha_plano(p) for p in action.planos]
-    linhas += ["", _t("presenter.ask_plan.rodape")]
-    return "\n".join(linhas)
+def vitrine(planos: list[PlanoResumo], canal: str | None = None) -> str:
+    """A vitrine dos planos: uma linha por plano e a pergunta. SEM preço — ele só sai da cotação.
+
+    Pública porque é a resposta certa para "me fala sobre os planos" venha ela pelo `AskPlan` da
+    policy ou de uma dúvida do lead: o catálogo é dado, não texto de modelo, e o lead tem de ver
+    sempre a MESMA lista. Nunca peça isso ao LLM.
+    """
+    linhas = [_linha_plano(p) for p in planos]
+    linhas.append(_t("presenter.ask_plan.rodape"))
+    return _para_canal("\n".join(linhas), canal or "whatsapp")
 
 
 def nomes_de_coberturas(chaves: list[str]) -> list[str]:
@@ -125,15 +167,16 @@ def _linha_plano(plano: PlanoResumo) -> str:
 
 
 def _present(action: Present, state: LeadState) -> str:
+    """Bloco único, uma informação por linha e sem linha em branco — leitura de WhatsApp."""
     quote = action.result.quote
     if action.result.outcome is not QuoteOutcome.OK or quote is None:
         raise ValueError("Present só renderiza cotação com outcome OK e quote preenchido.")
 
-    linhas = [_t("presenter.present.titulo", plano_nome=quote.plano_nome), ""]
-    linhas += _corpo_da_cotacao(quote)
+    linhas = [_t("presenter.present.titulo", plano_nome=quote.plano_nome, premio=_brl(quote.premio_mensal))]
+    linhas += _corpo_da_cotacao(quote, _vigencia(action.result))
     if action.cep_ausente:
         linhas.append(_t("presenter.present.aviso_cep_ausente"))
-    linhas += ["", _cta(state, quote)]
+    linhas.append(_cta(state, quote))
     return "\n".join(linhas)
 
 
@@ -168,7 +211,14 @@ def _bloco_do_carro(veiculo: VeiculoColetado) -> list[str]:
             motivo = _minuscula_inicial(resultado.motivo_recusa or "não cotamos esse perfil")
             return [_t("presenter.present_many.linha_recusa", carro=carro, motivo=motivo)]
         return [_t("presenter.present_many.linha_pendente", carro=carro)]
-    return [_t("presenter.present_many.titulo_carro", carro=carro), *_corpo_da_cotacao(quote)]
+    assert resultado is not None
+    titulo = _t("presenter.present_many.titulo_carro", carro=carro, premio=_brl(quote.premio_mensal))
+    return [titulo, *_corpo_da_cotacao(quote, _vigencia(resultado))]
+
+
+def _vigencia(resultado: QuoteResult) -> str:
+    """Data em que a apólice começa a valer: a que FOI enviada no request, não uma suposição."""
+    return _data_br(resultado.request.data_inicio)
 
 
 def _quote_ok(veiculo: VeiculoColetado) -> Quote | None:
@@ -178,30 +228,33 @@ def _quote_ok(veiculo: VeiculoColetado) -> Quote | None:
     return resultado.quote
 
 
-def _corpo_da_cotacao(quote: Quote) -> list[str]:
-    """Preço, franquia, coberturas, carência e pro-rata — o mesmo corpo para 1 ou N carros."""
-    premio = _brl(quote.premio_mensal)
+def _corpo_da_cotacao(quote: Quote, vigencia: str) -> list[str]:
+    """Franquia, coberturas, carência e pro-rata — o mesmo corpo para 1 ou N carros.
+
+    O preço não entra aqui: ele é a linha 1, junto do nome do plano (ou do carro).
+    A linha de pro-rata só existe quando a API mandou pro-rata, e é a única que fala de
+    vigência — é ela que explica por que o primeiro pagamento é diferente.
+    """
     linhas = [
-        _t("presenter.present.preco", premio=premio),
         _t("presenter.present.franquia", franquia=_brl(quote.franquia)),
         _t("presenter.present.coberturas", coberturas=_lista(_coberturas(quote.coberturas))),
     ]
     if quote.carencia_coberturas and quote.carencia_dias:
-        linhas += [
-            "",
+        linhas.append(
             _t(
                 "presenter.present.carencia",
                 coberturas_carencia=_lista(_coberturas(quote.carencia_coberturas)),
                 dias=quote.carencia_dias,
-            ),
-        ]
+            )
+        )
     if quote.pro_rata is not None:
         linhas.append(
             _t(
                 "presenter.present.pro_rata",
                 valor=_brl(quote.pro_rata.valor_primeiro_pagamento),
                 dias=quote.pro_rata.dias_cobrados,
-                premio=premio,
+                premio=_brl(quote.premio_mensal),
+                vigencia=vigencia,
             )
         )
     return linhas
@@ -215,8 +268,9 @@ def _cta(state: LeadState, quote: Quote) -> str:
 
 
 def _refuse(action: Refuse) -> str:
+    """Duas frases: a explicação (com o motivo) e o agradecimento. Recusa não vira handoff."""
     explicacao = _t("presenter.refuse", motivo=_minuscula_inicial(action.motivo))
-    return f"{explicacao}\n\n{_t('presenter.refuse.fechamento')}"
+    return f"{explicacao}\n{_t('presenter.refuse.fechamento')}"
 
 
 def _handoff(action: Handoff, state: LeadState) -> str:
@@ -332,6 +386,15 @@ def _cep_formatado(cep: str) -> str:
     return f"{cep[:5]}-{cep[5:]}" if len(cep) == 8 else cep
 
 
+def _data_br(iso: str) -> str:
+    """`2026-09-15` → `15/09/2026`. Fatiamento, não parsing: data inválida volta como veio."""
+    partes = (iso or "").split("-")
+    if len(partes) != 3:
+        return iso
+    ano, mes, dia = partes
+    return f"{dia}/{mes}/{ano}"
+
+
 def _minuscula_inicial(texto: str) -> str:
     texto = texto.strip()
     if not texto:
@@ -340,4 +403,12 @@ def _minuscula_inicial(texto: str) -> str:
     return frase if frase.endswith((".", "!", "?")) else f"{frase}."
 
 
-__all__ = ["aviso_consultor", "nomes_de_coberturas", "render", "resumo_dos_planos"]
+__all__ = [
+    "CANAIS",
+    "aviso_consultor",
+    "canal_de",
+    "nomes_de_coberturas",
+    "render",
+    "resumo_dos_planos",
+    "vitrine",
+]

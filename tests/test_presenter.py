@@ -101,12 +101,15 @@ def test_present_traduz_cobertura_tecnica():
 def test_present_com_pro_rata_explica_o_primeiro_pagamento():
     pro_rata = ProRata(dias_no_mes=30, dias_cobrados=16, valor_primeiro_pagamento=111.95)
     texto = render(_present(pro_rata=pro_rata), ESTADO)
-    assert "primeiro pagamento fica em R$ 111,95" in texto
+    assert "Primeiro pagamento de R$ 111,95" in texto
     assert "16 dias" in texto
+    assert "vigência a partir de 01/09/2026" in texto
 
 
 def test_present_sem_pro_rata_nao_fala_de_primeiro_pagamento():
-    assert "primeiro pagamento" not in render(_present(), ESTADO)
+    texto = render(_present(), ESTADO)
+    assert "pagamento" not in texto
+    assert "vigência a partir" not in texto      # vigência só aparece junto do pro-rata
 
 
 def test_present_avisa_estimativa_quando_falta_cep():
@@ -175,7 +178,7 @@ def test_handoff_tem_texto_para_todo_motivo(reason: HandoffReason):
 def test_handoff_por_motivo_e_especifico():
     aceitou = render(Handoff(reason=HandoffReason.LEAD_ACEITOU), ESTADO)
     indisponivel = render(Handoff(reason=HandoffReason.COTACAO_INDISPONIVEL), ESTADO)
-    assert "finalizar" in aceitou
+    assert "finaliza" in aceitou
     assert "instável" in indisponivel     # a verdade, não "estamos analisando"
     assert aceitou != indisponivel
 
@@ -225,18 +228,18 @@ def store_tmp(tmp_path, monkeypatch):
 
 
 def test_trocar_a_versao_ativa_muda_a_cta_na_hora(store_tmp):
-    assert "Quer fechar?" in render(_present(), ESTADO)
+    assert "Quer fechar com um consultor" in render(_present(), ESTADO)
     store_tmp.add_version("presenter.present.cta", "direta", "Fecha comigo?")
     texto = render(_present(), ESTADO)
     assert texto.endswith("Fecha comigo?")
-    assert "Quer fechar?" not in texto
+    assert "Quer fechar com um consultor" not in texto
 
 
 def test_texto_novo_nao_muda_a_formatacao_do_preco(store_tmp):
     """O template recebe o valor já formatado: editar texto não consegue estragar o número."""
-    store_tmp.add_version("presenter.present.preco", "sem bullet", "Fica em {premio} por mês")
+    store_tmp.add_version("presenter.present.titulo", "sem negrito", "{plano_nome}: {premio} por mês")
     texto = render(_present(premio_mensal=1025.14), ESTADO)
-    assert "Fica em R$ 1.025,14 por mês" in texto
+    assert texto.startswith("Completo: R$ 1.025,14 por mês")
 
 
 def test_handoff_e_cobertura_tambem_saem_do_store(store_tmp):
@@ -281,7 +284,7 @@ def test_present_many_traz_um_bloco_por_carro_e_um_cta_so():
     assert texto.startswith("Cotei os 2 carros no plano *Completo*:")
     assert "*Onix 2022*" in texto and "*HB20 2020*" in texto
     assert "R$ 209,90/mês" in texto and "R$ 189,50/mês" in texto
-    assert texto.count("Quer fechar?") == 1          # um fechamento, não um por carro
+    assert texto.count("Quer fechar com um consultor") == 1   # um fechamento, não um por carro
 
 
 def test_present_many_cita_recusado_e_pendente_sem_preco():
@@ -316,15 +319,15 @@ def test_cta_muda_quando_o_plano_foi_assumido():
     texto_varios = render(PresentMany(resultados=[_carro("Onix 2022", 2022)]), estado)
 
     for texto in (texto_um, texto_varios):
-        assert "prefere ver o Completo ou o Premium?" in texto
-        assert "Quer fechar?" not in texto
+        assert "ver o Completo ou o Premium?" in texto
+        assert "Quer fechar com um consultor" not in texto
 
 
 def test_um_carro_continua_com_o_texto_de_sempre():
     """O `Present` de 1 carro é o entregue: mesmo corpo, mesmo CTA (goldens intactos)."""
     texto = render(_present(), ESTADO)
-    assert texto.startswith("Cotei aqui o plano *Completo*:")
-    assert texto.endswith("Quer fechar? Um consultor finaliza com você. Ou prefere ver outro plano?")
+    assert texto.startswith("*Completo* — R$ 209,90/mês")
+    assert texto.endswith("Quer fechar com um consultor ou prefere ver outro plano?")
 
 
 # --------------------------------------------------------------------------- dados dos planos (F10)
@@ -360,3 +363,93 @@ def test_nomes_de_coberturas_nao_repete_e_traduz():
     assert nomes_de_coberturas(["colisao", "roubo", "colisao"]) == ["colisão", "roubo"]
     assert nomes_de_coberturas(["cobertura_nova"]) == ["cobertura nova"]   # fallback sem quebrar
 
+
+# --------------------------------------------------------------------------- canal (fix C)
+def test_cotacao_tem_os_seis_blocos_na_ordem_pedida():
+    """Uma informação por linha, sem linha em branco: é assim que se lê no WhatsApp."""
+    pro_rata = ProRata(dias_no_mes=30, dias_cobrados=16, valor_primeiro_pagamento=111.95)
+    linhas = render(_present(pro_rata=pro_rata), ESTADO).splitlines()
+
+    assert linhas[0] == "*Completo* — R$ 209,90/mês"
+    assert linhas[1] == "Franquia: R$ 3.000,00"
+    assert linhas[2].startswith("Cobre: colisão, roubo")
+    assert linhas[3].startswith("Carência: roubo e furto só valem 30 dias")
+    assert linhas[4].startswith("Primeiro pagamento de R$ 111,95 (16 dias)")
+    assert linhas[4].endswith("vigência a partir de 01/09/2026.")
+    assert linhas[5] == "Quer fechar com um consultor ou prefere ver outro plano?"
+    assert "" not in linhas
+
+
+def test_cotacao_sem_pro_rata_tem_cinco_linhas():
+    linhas = render(_present(), ESTADO).splitlines()
+    assert len(linhas) == 5
+    assert not any("vigência a partir" in linha for linha in linhas)
+
+
+def test_vitrine_tem_uma_linha_por_plano_sem_preco_e_fecha_perguntando():
+    planos = [
+        PlanoResumo(id="essencial", nome="Essencial", franquia=4500, coberturas=["colisao", "roubo", "furto"]),
+        PlanoResumo(id="completo", nome="Completo", franquia=3000, coberturas=["colisao", "vidros"]),
+        PlanoResumo(id="premium", nome="Premium", franquia=1500, coberturas=["colisao", "carro_reserva"]),
+    ]
+    linhas = render(AskPlan(planos=planos), ESTADO).splitlines()
+
+    assert len(linhas) == 4                                   # 3 planos + a pergunta
+    assert linhas[0] == "*Essencial* — colisão, roubo e furto · franquia R$ 4.500,00"
+    assert linhas[-1] == "Qual deles quer cotar?"
+    assert "/mês" not in "\n".join(linhas)                    # preço só na cotação
+
+
+def test_vitrine_e_a_mesma_lista_venha_da_acao_ou_da_funcao_publica():
+    planos = [PlanoResumo(id="completo", nome="Completo", franquia=3000, coberturas=["colisao"])]
+    from agent.presenter import vitrine
+
+    assert vitrine(planos) == render(AskPlan(planos=planos), ESTADO)
+
+
+@pytest.mark.parametrize("canal", ["cli", "lab"])
+def test_cli_e_lab_recebem_os_mesmos_blocos_sem_asterisco(canal: str):
+    whatsapp = render(_present(), ESTADO, canal="whatsapp")
+    plano = render(_present(), ESTADO, canal=canal)
+
+    assert "*" in whatsapp and "*" not in plano
+    assert plano == whatsapp.replace("*", "")
+    assert plano.splitlines()[0] == "Completo — R$ 209,90/mês"
+
+
+def test_canal_sai_da_origem_do_lead_quando_ninguem_passa():
+    from agent.presenter import canal_de
+
+    assert canal_de("whatsapp:principal") == "whatsapp"
+    assert canal_de("cli") == "cli"
+    assert canal_de("lab") == "lab"
+    assert canal_de(None) == "whatsapp"                       # log antigo/replay: canal do produto
+    assert canal_de("telegram") == "whatsapp"
+
+    wa = LeadState(conversation_id="c", origem="whatsapp:principal")
+    cli = LeadState(conversation_id="c", origem="cli")
+    assert "*Completo*" in render(_present(), wa)
+    assert "*" not in render(_present(), cli)
+
+
+def test_negrito_de_rotulo_cai_mas_asterisco_solto_nao_atrapalha():
+    from agent.presenter import render as render_real
+
+    estado = LeadState(conversation_id="c", origem="cli")
+    assert render_real(SendText(text="2 * 3 = 6"), estado) == "2 * 3 = 6"
+
+
+def test_perguntas_de_campo_e_handoff_cabem_no_limite_de_frases():
+    """Campo: 1 frase (fallback do brain). Handoff: 2 frases. Recusa: 2 frases + motivo."""
+    from agent.brain import CAMPOS, fallback_text
+
+    for campo in CAMPOS:
+        assert fallback_text(campo).count(".") + fallback_text(campo).count("?") == 1
+
+    for reason in HandoffReason:
+        texto = render(Handoff(reason=reason), ESTADO)
+        assert len(re.findall(r"[.!?](?:\s|$)", texto)) <= 2, texto
+
+    recusa = render(Refuse(motivo="Só cotamos condutores de 18 a 75 anos."), ESTADO)
+    assert len(recusa.splitlines()) == 2
+    assert "18 a 75" in recusa
