@@ -43,7 +43,7 @@ def test_todo_slot_do_codigo_existe_com_default_igual(store: ConfigStore) -> Non
 def test_tools_e_settings_sem_override_vem_do_codigo(store: ConfigStore) -> None:
     ef = store.effective("tools.quote_client.timeout_s")
     assert ef["value"] == 3.5 and ef["origem"] in ("default", "env:QUOTE_TIMEOUT_S")
-    assert store.param("settings.responder_history_runs") == 8
+    assert store.param("settings.responder_history_runs") == 4
     assert store.param("tools.rules.pre_validacao_local") is True
     assert store.param("tools.viacep.enabled") is True
 

@@ -303,7 +303,7 @@ def _code_defaults() -> dict[str, dict[str, Any]]:
         },
         "settings": {
             "gemini_model": settings.gemini_model,
-            "responder_history_runs": 8,
+            "responder_history_runs": 4,
             "extractor_temperature": 0.0,
             "responder_temperature": 0.4,
             "llm_max_tentativas": 4,
