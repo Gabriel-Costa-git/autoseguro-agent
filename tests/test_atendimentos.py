@@ -12,6 +12,8 @@ import json
 import pytest
 
 from agent.atendimentos import Catalogo
+from agent.observability import ConversationLogger
+from agent.pii import nome_arquivo_log
 from agent.takeover import TakeoverStore
 
 # Linhas copiadas de `logs/entrega/caminho-feliz.jsonl` (formato entregue, sem `data.origem`).
@@ -41,9 +43,21 @@ def _linha(ts: str, event: str, message_id: str = "m1", **data) -> str:
     )
 
 
-def _escrever(dir_, cid: str, linhas: list[str]) -> None:
+def _escrever(dir_, cid: str, linhas: list[str], nome_arquivo: str | None = None) -> None:
+    """Escreve o log de `cid`. O `conversation_id` de dentro das linhas é o de verdade —
+    é dele que o `Catalogo` tira a identidade da conversa, porque o NOME do arquivo pode
+    ser o hasheado (`pii.nome_arquivo_log`). `nome_arquivo` força o nome no disco.
+    """
     dir_.mkdir(parents=True, exist_ok=True)
-    (dir_ / f"{cid}.jsonl").write_text("\n".join(linhas) + "\n", encoding="utf-8")
+    linhas = [_com_cid(linha, cid) for linha in linhas]
+    (dir_ / f"{nome_arquivo or cid}.jsonl").write_text("\n".join(linhas) + "\n", encoding="utf-8")
+
+
+def _com_cid(linha: str, cid: str) -> str:
+    evento = json.loads(linha)
+    if evento.get("conversation_id") == "x":       # marcador do `_linha`
+        evento["conversation_id"] = cid
+    return json.dumps(evento, ensure_ascii=False)
 
 
 @pytest.fixture
@@ -280,3 +294,72 @@ def test_conversa_com_handoff_e_takeover_fica_humana_sem_perder_o_motivo(tmp_pat
     canais = [e["data"]["canal"] for e in eventos if e["event"] == "handoff_notice"]
     assert canais == ["takeover", "whatsapp"]      # a transcrição mostra o que foi avisado
 
+
+
+# --------------------------------------------------------------------------- nome de arquivo hasheado
+CID_WA = "wa-5511999990000"
+
+
+def _linhas_de_conversa(cid: str = CID_WA) -> list[str]:
+    return [
+        _linha("2026-09-03T10:00:00+00:00", "inbound", text="Oi, quero cotar", media_type="text",
+               sender_name="Ana Souza", origem="whatsapp:corretora"),
+        _linha("2026-09-03T10:00:01+00:00", "decision", stage="coleta_idade", actions=["ask_field"]),
+    ]
+
+
+def test_conversa_com_nome_hasheado_aparece_com_o_id_de_verdade(tmp_path):
+    """O arquivo é `wa-<sha1>`; a lista e o link têm de mostrar `wa-<telefone>`, que é o id
+    que o canal e o takeover usam. Sem isto, o painel não acha conversa nova nenhuma."""
+    logs = tmp_path / "logs"
+    _escrever(logs, CID_WA, _linhas_de_conversa(), nome_arquivo=nome_arquivo_log(CID_WA))
+    assert not (logs / f"{CID_WA}.jsonl").exists()          # o telefone não está no disco
+
+    catalogo = Catalogo(logs)
+    assert [i["conversation_id"] for i in catalogo.listar()] == [CID_WA]
+    assert catalogo.resumo(CID_WA)["nome"] == "Ana Souza"
+    assert catalogo.transcricao(CID_WA)["total"] == 2
+
+
+def test_status_do_takeover_bate_com_o_id_interno(tmp_path):
+    """O `TakeoverStore` é indexado pelo id interno: se o catálogo usasse o nome do arquivo,
+    o painel mostraria "agente" numa conversa assumida."""
+    logs = tmp_path / "logs"
+    _escrever(logs, CID_WA, _linhas_de_conversa(), nome_arquivo=nome_arquivo_log(CID_WA))
+    takeover = TakeoverStore(tmp_path / "config")
+    takeover.assumir(CID_WA)
+    catalogo = Catalogo(logs, takeover=takeover)
+
+    assert catalogo.resumo(CID_WA)["status"] == "humano"
+    assert [i["conversation_id"] for i in catalogo.listar(status="humano")] == [CID_WA]
+
+
+def test_arquivo_legado_com_o_numero_em_claro_continua_sendo_achado(tmp_path):
+    """Log escrito antes da F11 (e ainda em uso: o logger continua escrevendo nele)."""
+    logs = tmp_path / "logs"
+    _escrever(logs, CID_WA, _linhas_de_conversa())          # nome = o próprio cid
+    catalogo = Catalogo(logs)
+    assert [i["conversation_id"] for i in catalogo.listar()] == [CID_WA]
+    assert catalogo.resumo(CID_WA)["turnos"] == 1
+
+
+def test_catalogo_le_o_que_o_conversation_logger_escreve(tmp_path):
+    """As duas pontas juntas: quem grava é o logger de verdade, quem lê é o catálogo."""
+    logs = tmp_path / "logs"
+    logger = ConversationLogger(logs, CID_WA)
+    logger.event("inbound", message_id="m1", text="oi", media_type="text", origem="whatsapp:corretora")
+    logger.event("decision", message_id="m1", stage="handoff", actions=["handoff"])
+
+    catalogo = Catalogo(logs)
+    resumo = catalogo.resumo(CID_WA)
+    assert resumo["conversation_id"] == CID_WA
+    assert resumo["status"] == "encerrado"
+    assert catalogo._path(CID_WA) == logger.path
+
+
+def test_log_sem_evento_legivel_cai_para_o_nome_do_arquivo(tmp_path):
+    """Plano B: arquivo vazio ou só com linha truncada ainda aparece na lista."""
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True)
+    (logs / "cli-quebrado.jsonl").write_text("{linha truncada\n", encoding="utf-8")
+    assert [i["conversation_id"] for i in Catalogo(logs).listar()] == ["cli-quebrado"]
