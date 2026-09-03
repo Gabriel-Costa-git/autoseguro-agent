@@ -5,6 +5,7 @@ que o `conversation.py` faz com as ações, não a decisão em si.
 """
 from __future__ import annotations
 
+import os
 from datetime import date
 from pathlib import Path
 
@@ -432,15 +433,24 @@ QUOTE_200 = {
 }
 
 
-def _conversa_real(tmp_path: Path, respostas_quote: list[int]):
-    """Monta a conversa com os módulos reais; `respostas_quote` são os status do POST /quote."""
+def _conversa_real(tmp_path: Path, respostas_quote: list[int], extracoes=None):
+    """Monta a conversa com os módulos reais; `respostas_quote` são os status do POST /quote.
+
+    `extracoes` é o roteiro do Extractor. Ele muda de tamanho conforme o texto do lead: o
+    pré-parser do `conversation` resolve "01310-100" e "sim" sem LLM, e nesses turnos NENHUMA
+    entrada do roteiro é consumida — é exatamente a economia que ele existe para fazer.
+    """
     restantes = list(respostas_quote)
 
     def quote_handler(request: httpx.Request) -> httpx.Response:
         status = restantes.pop(0) if restantes else 200
-        if status == 200:
-            return httpx.Response(200, json=QUOTE_200)
-        return httpx.Response(status, json={"error": "upstream_unavailable"})
+        if status != 200:
+            return httpx.Response(status, json={"error": "upstream_unavailable"})
+        # A API do desafio devolve o plano que foi pedido; o fixture é de um plano só, então
+        # aqui o id/nome são ecoados — senão o lead escolhe "essencial" e recebe "Completo".
+        plano_id = __import__("json").loads(request.content or b"{}").get("plano_id", "completo")
+        corpo = {**QUOTE_200, "plano_id": plano_id, "plano_nome": plano_id.capitalize()}
+        return httpx.Response(200, json=corpo)
 
     def viacep_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"localidade": "São Paulo", "uf": "SP"})
@@ -456,12 +466,15 @@ def _conversa_real(tmp_path: Path, respostas_quote: list[int]):
         rules=Rules.from_planos(PLANOS, HOJE),
         quote_client=QuoteClient("http://api", transport=httpx.MockTransport(quote_handler), sleep=sem_sono),
         extractor=FakeExtractor(
-            [
+            extracoes
+            if extracoes is not None
+            else [
                 Extraction(intent=Intent.FORNECER_DADOS, idade=35),
                 Extraction(intent=Intent.ESCOLHER_PLANO, plano_id="completo"),
                 Extraction(intent=Intent.FORNECER_DADOS, veiculo_texto="Onix", veiculo_ano=2019),
                 Extraction(intent=Intent.FORNECER_DADOS, cep="01310-100"),
                 Extraction(intent=Intent.CONFIRMAR),
+                Extraction(intent=Intent.FORNECER_DADOS, data_inicio=HOJE),
             ]
         ),
         responder=FakeResponder(),
@@ -483,14 +496,18 @@ async def test_integracao_caminho_feliz_com_policy_presenter_e_cliente_reais(tmp
     _, s2 = await falar(conv, "quero o completo", 2)
     _, s3 = await falar(conv, "é um Onix 2019", 3)
     _, s4 = await falar(conv, "meu cep é 01310-100", 4)
-    state, s5 = await falar(conv, "sim, é isso", 5)
+    _, s5 = await falar(conv, "sim, é isso", 5)
+    state, s6 = await falar(conv, "pode ser hoje mesmo", 6)
 
     assert "Essencial" in s1[0].text and "209,90" not in s1[0].text   # planos sem prêmio, só franquia
-    assert s2[0].source == "llm" and "ano" in s2[0].text.lower()
-    assert s3[0].source == "llm"
+    # Pergunta seca fora do 1º turno é o texto do slot: o Responder não é chamado (template-first).
+    assert s2[0].source == "template" and "ano" in s2[0].text.lower()
+    assert s3[0].source == "template"
     assert "São Paulo" in s4[0].text                     # ViaCEP real (mockado no transporte)
+    # A data é o último campo da coleta: sem ela, o pro-rata apareceria sem ninguém ter falado nisso.
+    assert s5[0].source == "template" and "hoje" in s5[0].text.lower()
     assert state.stage is Stage.APRESENTADO
-    assert "R$ 209,90" in s5[-1].text                    # único preço da conversa, vindo da API
+    assert "R$ 209,90" in s6[-1].text                    # único preço da conversa, vindo da API
 
     eventos = [
         __import__("json").loads(linha)
@@ -503,12 +520,25 @@ async def test_integracao_caminho_feliz_com_policy_presenter_e_cliente_reais(tmp
 
 @pytest.mark.asyncio
 async def test_integracao_api_fora_do_ar_escala_sem_inventar_preco(tmp_path):
-    conv = _conversa_real(tmp_path, [503, 502, 500, 503])
+    # "01310-100" e "sim" são resolvidos pelo pré-parser: o roteiro do Extractor só tem os
+    # quatro turnos que realmente vão ao LLM.
+    conv = _conversa_real(
+        tmp_path,
+        [503, 502, 500, 503],
+        extracoes=[
+            Extraction(intent=Intent.FORNECER_DADOS, idade=35),
+            Extraction(intent=Intent.ESCOLHER_PLANO, plano_id="completo"),
+            Extraction(intent=Intent.FORNECER_DADOS, veiculo_texto="Onix", veiculo_ano=2019),
+            Extraction(intent=Intent.FORNECER_DADOS, data_inicio=HOJE),
+        ],
+    )
     todas: list[Outbound] = []
-    for n, texto in enumerate(["tenho 35", "o completo", "Onix 2019", "01310-100", "sim"], start=1):
+    roteiro = ["tenho 35", "o completo", "Onix 2019", "01310-100", "sim", "hoje mesmo"]
+    for n, texto in enumerate(roteiro, start=1):
         state, saidas = await falar(conv, texto, n)
         todas.extend(saidas)
 
+    assert len(conv.extractor.chamadas) == 4        # 6 turnos, 4 chamadas: o pré-parser pegou 2
     assert state.stage is Stage.HANDOFF
     assert state.handoff_reason is HandoffReason.COTACAO_INDISPONIVEL
     # Nenhuma mensagem carrega mensalidade: sem cotação, valor nenhum sai (franquia dos
@@ -834,3 +864,156 @@ async def test_erro_interno_tambem_avisa_o_consultor(tmp_path):
     assert saidas[0].text == TEXTO_ERRO
     assert avisos == [(HandoffReason.ERRO_INTERNO, "erro_interno")]
 
+
+
+# --------------------------------------------------------------------------- goldens de fluxo
+# Cinco roteiros inteiros, byte a byte: o que o LEAD lê, na ordem em que lê, e o estado em que a
+# conversa parou. Os testes acima provam pedaços; estes travam a conversa completa — é o que
+# pega a regressão que nenhuma asserção isolada vê (uma pergunta a mais, uma frase que sumiu,
+# uma etapa que trocou de lugar). Regravar é decisão explícita:
+#
+#     ATUALIZAR_GOLDENS=1 uv run pytest tests/test_conversation.py -k fluxo
+#
+# e o diff dos `.txt` tem de ser lido no code review como se fosse código.
+GOLDEN_FLUXO_DIR = Path(__file__).parent / "golden"
+
+
+def _roteiro_feliz():
+    return (
+        [
+            ("oi, tenho 35 anos", None),
+            ("quero o completo", None),
+            ("é um Onix 2019", None),
+            ("meu cep é 01310-100", None),
+            ("sim, é isso", None),
+            ("pode ser hoje", None),
+        ],
+        [
+            Extraction(intent=Intent.FORNECER_DADOS, idade=35),
+            Extraction(intent=Intent.ESCOLHER_PLANO, plano_id="completo"),
+            Extraction(intent=Intent.FORNECER_DADOS, veiculo_texto="Onix", veiculo_ano=2019),
+            Extraction(intent=Intent.FORNECER_DADOS, cep="01310-100"),
+            Extraction(intent=Intent.CONFIRMAR),
+            Extraction(intent=Intent.FORNECER_DADOS, data_inicio=HOJE),
+        ],
+        [200],
+    )
+
+
+def _roteiro_falha_api():
+    return (
+        [
+            ("tenho 35 anos", None),
+            ("o completo", None),
+            ("Onix 2019", None),
+            ("01310-100", None),          # o pré-parser resolve: não consome extração
+            ("sim", None),                # idem
+            ("hoje mesmo", None),
+        ],
+        [
+            Extraction(intent=Intent.FORNECER_DADOS, idade=35),
+            Extraction(intent=Intent.ESCOLHER_PLANO, plano_id="completo"),
+            Extraction(intent=Intent.FORNECER_DADOS, veiculo_texto="Onix", veiculo_ano=2019),
+            Extraction(intent=Intent.FORNECER_DADOS, data_inicio=HOJE),
+        ],
+        [503, 502, 500, 503],
+    )
+
+
+def _roteiro_recusa():
+    return (
+        [("tenho 90 anos", None), ("que pena", None)],
+        [
+            Extraction(intent=Intent.FORNECER_DADOS, idade=90),
+            Extraction(intent=Intent.OUTRO),
+        ],
+        [200],
+    )
+
+
+def _roteiro_cep_invalido():
+    return (
+        [
+            ("tenho 35 anos", None),
+            ("o essencial", None),
+            ("Onix 2019", None),
+            ("123", None),                # pré-parser: dígitos que não formam CEP → vai ao LLM
+            ("abc", None),
+            ("hoje", None),
+        ],
+        [
+            Extraction(intent=Intent.FORNECER_DADOS, idade=35),
+            Extraction(intent=Intent.ESCOLHER_PLANO, plano_id="essencial"),
+            Extraction(intent=Intent.FORNECER_DADOS, veiculo_texto="Onix", veiculo_ano=2019),
+            Extraction(intent=Intent.FORNECER_DADOS, cep="123"),
+            Extraction(intent=Intent.FORNECER_DADOS, cep="abc"),
+            Extraction(intent=Intent.FORNECER_DADOS, data_inicio=HOJE),
+        ],
+        [200],
+    )
+
+
+def _roteiro_reabertura():
+    return (
+        [
+            ("tenho 35 anos", None),
+            ("o completo", None),
+            ("é um Corsa 2001", None),
+            ("então cota pro meu outro carro, um Onix 2019", None),
+        ],
+        [
+            Extraction(intent=Intent.FORNECER_DADOS, idade=35),
+            Extraction(intent=Intent.ESCOLHER_PLANO, plano_id="completo"),
+            Extraction(intent=Intent.FORNECER_DADOS, veiculo_texto="Corsa", veiculo_ano=2001),
+            Extraction(intent=Intent.FORNECER_DADOS, veiculo_texto="Onix", veiculo_ano=2019),
+        ],
+        [200],
+    )
+
+
+ROTEIROS = {
+    "feliz": _roteiro_feliz,
+    "falha_api": _roteiro_falha_api,
+    "recusa": _roteiro_recusa,
+    "cep_invalido": _roteiro_cep_invalido,
+    "reabertura": _roteiro_reabertura,
+}
+
+
+async def _transcrever(tmp_path: Path, nome: str) -> str:
+    """Roda o roteiro na conversa REAL e devolve a transcrição determinística."""
+    mensagens, extracoes, quotes = ROTEIROS[nome]()
+    conv = _conversa_real(tmp_path, quotes, extracoes=extracoes)
+    linhas = [f"# fluxo_{nome}"]
+    state = None
+    for n, (texto, media) in enumerate(mensagens, start=1):
+        state, saidas = await falar(conv, texto, n, media=media or "text")
+        linhas.append(f"lead: {texto}")
+        if not saidas:
+            linhas.append("  (sem resposta)")
+        for out in saidas:
+            for i, linha in enumerate((out.text or "").split("\n")):
+                prefixo = f"  agente [{out.source}]: " if i == 0 else "    "
+                linhas.append(f"{prefixo}{linha}".rstrip())
+    assert state is not None
+    linhas.append("")
+    linhas.append(
+        "estado: stage={} handoff={} cep_ausente={} data_assumida={} chamadas_extractor={}".format(
+            state.stage.value,
+            state.handoff_reason.value if state.handoff_reason else "-",
+            state.cep_ausente,
+            state.data_assumida,
+            len(conv.extractor.chamadas),
+        )
+    )
+    return "\n".join(linhas) + "\n"
+
+
+@pytest.mark.parametrize("nome", sorted(ROTEIROS))
+@pytest.mark.asyncio
+async def test_fluxo_igual_ao_golden(tmp_path, nome: str):
+    transcricao = await _transcrever(tmp_path, nome)
+    alvo = GOLDEN_FLUXO_DIR / f"fluxo_{nome}.txt"
+    if os.environ.get("ATUALIZAR_GOLDENS"):
+        alvo.write_text(transcricao, encoding="utf-8")
+    assert transcricao == alvo.read_text(encoding="utf-8")

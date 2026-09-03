@@ -2,9 +2,15 @@
 
 O `LeadState` é volátil (`InMemoryStateStore`) e o Studio roda em outro processo que o
 canal — então a única fonte durável de "o que aconteceu com este lead" é o log de cada
-conversa: `logs/<conversation_id>.jsonl` (produção) e `logs/studio/*.jsonl` (Lab), no
-formato de `agent/observability.py`, já mascarado. `logs/entrega/` fica de fora: são
-cenários fixos da entrega, não atendimento.
+conversa: `logs/*.jsonl` (produção) e `logs/studio/*.jsonl` (Lab), no formato de
+`agent/observability.py`, já mascarado. `logs/entrega/` fica de fora: são cenários fixos
+da entrega, não atendimento.
+
+**O nome do arquivo não é mais o `conversation_id`.** Desde a F11 uma conversa de WhatsApp
+mora em `wa-<sha1(telefone)[:10]>.jsonl` (`pii.nome_arquivo_log`): o telefone não fica no
+disco onde não há máscara possível. O id verdadeiro está DENTRO de cada evento, e é ele
+que o takeover e o canal usam — daí a leitura tirar o id dos eventos e cair para o nome do
+arquivo só quando não houver evento nenhum (log vazio, ou de antes deste formato).
 
 Este módulo só LÊ e resume — não decide nada e não escreve log. Quem responde cada
 conversa é o `TakeoverStore` (`agent/takeover.py`), consultado na hora de montar o
@@ -22,6 +28,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from agent.pii import nome_arquivo_log
 
 # Prefixo do id → origem, para conversas anteriores ao campo `data.origem`.
 ORIGEM_POR_PREFIXO = {"wa-": "whatsapp", "cli-": "cli", "lab-": "lab"}
@@ -67,7 +75,7 @@ class _Registro:
     ordem: datetime = _EPOCA
 
 
-def _ler(path: Path, conversation_id: str) -> _Registro:
+def _ler(path: Path) -> _Registro:
     eventos: list[dict[str, Any]] = []
     for linha in path.read_text(encoding="utf-8").splitlines():
         linha = linha.strip()
@@ -79,7 +87,20 @@ def _ler(path: Path, conversation_id: str) -> _Registro:
             continue          # linha truncada (crash no meio da escrita) — ignora
         if isinstance(evento, dict):
             eventos.append(evento)
-    return _resumir(conversation_id, eventos)
+    return _resumir(_conversation_id(path, eventos), eventos)
+
+
+def _conversation_id(path: Path, eventos: list[dict[str, Any]]) -> str:
+    """O id vem dos eventos; o nome do arquivo é só o plano B.
+
+    Com o nome hasheado, `path.stem` daria `wa-ab12cd34ef` — um id que o `TakeoverStore`
+    e o canal não conhecem, então o painel mostraria o status errado e o link não abriria.
+    """
+    for evento in eventos:
+        cid = evento.get("conversation_id")
+        if isinstance(cid, str) and cid:
+            return cid
+    return path.stem
 
 
 def _resumir(conversation_id: str, eventos: list[dict[str, Any]]) -> _Registro:
@@ -166,19 +187,27 @@ class Catalogo:
         if hit is not None and hit[0] == assinatura:
             return hit[1]
         try:
-            registro = _ler(path, path.stem)
+            registro = _ler(path)
         except OSError:
             return None
         self._cache[path] = (assinatura, registro)
         return registro
 
     def _path(self, conversation_id: str) -> Path | None:
+        """Arquivo de uma conversa: o legado (nome em claro) ou o derivado (F11).
+
+        Os dois existem em produção. A ordem é a MESMA do `ConversationLogger`: quando o
+        arquivo antigo existe, é nele que a conversa continua sendo escrita, então é ele
+        que o painel tem de abrir.
+        """
         if not _CID_RE.fullmatch(conversation_id):
             return None
+        nomes = dict.fromkeys((conversation_id, nome_arquivo_log(conversation_id)))
         for diretorio in (self.log_dir, self.studio_log_dir):
-            path = diretorio / f"{conversation_id}.jsonl"
-            if path.is_file():
-                return path
+            for nome in nomes:
+                path = diretorio / f"{nome}.jsonl"
+                if path.is_file():
+                    return path
         return None
 
     # ------------------------------------------------------------------ resumos

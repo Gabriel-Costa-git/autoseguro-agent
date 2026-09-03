@@ -16,7 +16,20 @@ import pytest
 from agent.channels import evolution as evolution_mod
 from agent.channels.evolution import EvolutionSender, build_app, parse_webhook
 from agent.models import Inbound, LeadState, Outbound
+from agent.pii import nome_arquivo_log
 from agent.takeover import TakeoverStore
+
+
+class ConfigFake:
+    """Config do canal sem tocar `config/`: debounce desligado, salvo quando o teste quer."""
+
+    def __init__(self, **over: Any) -> None:
+        self.valores = {"max_respostas_por_minuto": 6, "debounce_s": 0.0, **over}
+
+    def param(self, path: str) -> Any:
+        grupo, _, chave = path.rpartition(".")
+        assert grupo == "tools.canal", grupo
+        return self.valores[chave]
 
 
 def _payload(
@@ -31,14 +44,17 @@ def _payload(
     ts: int | None = 1709550600,
     event: str = "messages.upsert",
     com_data: bool = True,
+    message: dict[str, Any] | None = None,
+    stub_type: int | None = None,
 ) -> dict[str, Any]:
-    message: dict[str, Any] = {}
-    if texto is not None:
-        message["conversation"] = texto
-    if extended is not None:
-        message["extendedTextMessage"] = {"text": extended}
-    if media is not None:
-        message[f"{media}Message"] = {}
+    if message is None:
+        message = {}
+        if texto is not None:
+            message["conversation"] = texto
+        if extended is not None:
+            message["extendedTextMessage"] = {"text": extended}
+        if media is not None:
+            message[f"{media}Message"] = {}
 
     payload: dict[str, Any] = {"event": event, "instance": "minha-instancia"}
     if com_data:
@@ -48,6 +64,8 @@ def _payload(
             "messageTimestamp": ts,
             "pushName": push_name,
         }
+        if stub_type is not None:
+            payload["data"]["messageStubType"] = stub_type
     return payload
 
 
@@ -120,6 +138,56 @@ def test_parse_webhook_from_me_ignorado():
 
 def test_parse_webhook_evento_errado_ignorado():
     assert parse_webhook({"event": "connection.update", "data": {}}) is None
+
+
+def test_parse_webhook_mensagem_vazia_ignorada():
+    """Upsert com `message` vazio não é mensagem de ninguém — era 1 turno por recibo."""
+    assert parse_webhook(_payload(message={})) is None
+    assert parse_webhook(_payload(message=None, texto=None)) is None
+
+
+@pytest.mark.parametrize(
+    "chave",
+    [
+        "protocolMessage",
+        "senderKeyDistributionMessage",
+        "messageContextInfo",
+        "reactionMessage",
+        "editedMessage",
+        "pollUpdateMessage",
+    ],
+)
+def test_parse_webhook_so_com_chave_de_protocolo_ignorado(chave):
+    assert parse_webhook(_payload(message={chave: {"algo": 1}})) is None
+
+
+def test_parse_webhook_protocolo_junto_com_texto_vira_turno():
+    """`messageContextInfo` acompanha mensagem de verdade: o que decide é o CONTEÚDO."""
+    inbound = parse_webhook(_payload(message={"messageContextInfo": {}, "conversation": "oi"}))
+    assert inbound is not None and inbound.text == "oi"
+
+
+def test_parse_webhook_message_stub_type_ignorado():
+    """Evento de sistema da conversa (chamada perdida, número mudou), não mensagem."""
+    assert parse_webhook(_payload(texto="oi", stub_type=2)) is None
+
+
+def test_parse_webhook_ephemeral_vazio_ignorado_e_com_texto_aceito():
+    vazio = _payload(message={"ephemeralMessage": {"message": {"protocolMessage": {}}}})
+    assert parse_webhook(vazio) is None
+
+    com_texto = _payload(message={"ephemeralMessage": {"message": {"conversation": "some em 24h"}}})
+    inbound = parse_webhook(com_texto)
+    assert inbound is not None and inbound.text == "some em 24h"
+
+
+def test_parse_webhook_midia_continua_virando_turno():
+    """O filtro é de protocolo, não de mídia: áudio/imagem/documento seguem valendo."""
+    for media, esperado in (("audio", "audio"), ("image", "image"), ("document", "document")):
+        inbound = parse_webhook(_payload(media=media))
+        assert inbound is not None and inbound.media_type == esperado
+    sticker = parse_webhook(_payload(message={"stickerMessage": {}}))
+    assert sticker is not None and sticker.media_type == "other"
 
 
 def test_parse_webhook_sem_data_ignorado():
@@ -224,7 +292,7 @@ def _sender_mudo() -> tuple[EvolutionSender, list[dict[str, Any]]]:
 @pytest.mark.asyncio
 async def test_health():
     sender, _ = _sender_mudo()
-    app = build_app(FakeConversation(), sender)
+    app = build_app(FakeConversation(), sender, config=ConfigFake())
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/health")
     assert resp.status_code == 200
@@ -235,7 +303,7 @@ async def test_health():
 async def test_webhook_evento_ignorado_nao_chama_handle():
     sender, _ = _sender_mudo()
     conversation = FakeConversation()
-    app = build_app(conversation, sender)
+    app = build_app(conversation, sender, config=ConfigFake())
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post("/webhook", json={"event": "connection.update", "data": {}})
     assert resp.status_code == 200
@@ -247,7 +315,7 @@ async def test_webhook_evento_ignorado_nao_chama_handle():
 async def test_webhook_chama_handle_e_sender_recebe_sendtext_com_numero_certo():
     sender, chamadas = _sender_mudo()
     conversation = FakeConversation()
-    app = build_app(conversation, sender)
+    app = build_app(conversation, sender, config=ConfigFake())
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post("/webhook", json=_payload(texto="quero cotar"))
@@ -265,7 +333,9 @@ async def test_webhook_chama_handle_e_sender_recebe_sendtext_com_numero_certo():
             "body": {"number": "5511999999999", "text": "resposta para 3EB0ABC"},
         }
     ]
-    assert len(typing_calls) == 1
+    # "digitando" ao ENTRAR no turno e de novo antes da saída: o lead vê atividade
+    # durante a extração e a cotação, não só no instante do envio.
+    assert len(typing_calls) == 2
 
 
 @pytest.mark.asyncio
@@ -276,7 +346,7 @@ async def test_webhook_falha_do_sender_nao_derruba_processamento():
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     sender = EvolutionSender("http://evolution.test", "chave", "minha-instancia", client=client)
     conversation = FakeConversation()
-    app = build_app(conversation, sender)
+    app = build_app(conversation, sender, config=ConfigFake())
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client_app:
         resp = await client_app.post("/webhook", json=_payload(texto="oi"))
@@ -289,7 +359,7 @@ async def test_webhook_falha_do_sender_nao_derruba_processamento():
 async def test_duas_mensagens_do_mesmo_lead_sao_serializadas_em_ordem():
     sender, _ = _sender_mudo()
     conversation = FakeConversation(delay_para="m1", delay_s=0.05)
-    app = build_app(conversation, sender)
+    app = build_app(conversation, sender, config=ConfigFake())
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         task1 = asyncio.create_task(client.post("/webhook", json=_payload(texto="primeira", message_id="m1")))
@@ -315,7 +385,7 @@ def _com_takeover(tmp_path, monkeypatch, assumidas: list[str]):
         takeover.assumir(cid)
     sender, chamadas = _sender_mudo()
     conversation = FakeConversation()
-    return build_app(conversation, sender, takeover=takeover), conversation, chamadas
+    return build_app(conversation, sender, takeover=takeover, config=ConfigFake()), conversation, chamadas
 
 
 @pytest.mark.asyncio
@@ -329,7 +399,9 @@ async def test_webhook_em_modo_humano_nao_chama_o_agente_e_loga_inbound(tmp_path
     assert conversation.recebidos == []        # o agente não respondeu
     assert chamadas == []                      # nem mandou nada pelo WhatsApp
 
-    linhas = (tmp_path / "logs" / "wa-5511999999999.jsonl").read_text(encoding="utf-8").splitlines()
+    arquivo = tmp_path / "logs" / f"{nome_arquivo_log('wa-5511999999999')}.jsonl"
+    assert "5511999999999" not in arquivo.name          # o telefone não vai para o disco
+    linhas = arquivo.read_text(encoding="utf-8").splitlines()
     evento = json.loads(linhas[0])
     assert evento["event"] == "inbound"
     assert evento["message_id"] == "3EB0ABC"

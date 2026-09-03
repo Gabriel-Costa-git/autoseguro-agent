@@ -40,6 +40,7 @@ from agent.defaults import SLOTS
 CONFIG_DIR = ROOT / "config"
 
 DEFAULT_VERSION = "default"
+AUTO_ASSUMIR = "tools.handoff.auto_assumir"
 _PLACEHOLDER_RE = re.compile(r"{([a-zA-Z_][a-zA-Z0-9_]*)}")
 
 # --- tools do painel
@@ -82,6 +83,7 @@ class QuoteClientTools(BaseModel):
     max_attempts: int | None = Field(None, ge=1, le=10)
     budget_s: float | None = Field(None, gt=0)
     backoff_base_s: float | None = Field(None, ge=0)
+    planos_ttl_s: float | None = Field(None, ge=0)   # 0 = relê o /planos a cada uso
 
 
 class ViacepTools(BaseModel):
@@ -96,6 +98,8 @@ class PolicyTools(BaseModel):
     objecoes_ate_handoff: int | None = Field(None, ge=1)
     plano_padrao: str | None = None            # assumido quando o lead não escolhe
     max_veiculos: int | None = Field(None, ge=1, le=5)
+    max_indisponivel: int | None = Field(None, ge=1)   # extrações falhas seguidas → humano
+    max_midias: int | None = Field(None, ge=1)         # mídias seguidas sem texto → humano
 
 
 class RulesTools(BaseModel):
@@ -110,6 +114,18 @@ class HandoffTools(BaseModel):
     webhook_url: str | None = None              # POST opcional para o CRM
     webhook_headers: dict[str, str] | None = None   # valores aceitam `${env:X}`
     studio_url: str | None = None               # base do link de Atendimentos no aviso
+    auto_devolver_apos_min: int | None = Field(None, ge=1)   # takeover automático parado volta ao agente
+
+
+class CanalTools(BaseModel):
+    """Freios do canal WhatsApp (ver `agent/channels/evolution.py`).
+
+    Existem por causa do incidente de 02/09: 23 eventos de protocolo viraram 23 respostas
+    iguais em 80 s para uma pessoa real. Não são ajuste fino — são o teto de dano.
+    """
+
+    max_respostas_por_minuto: int | None = Field(None, ge=1)   # por conversa; estourou, não envia
+    debounce_s: float | None = Field(None, ge=0)               # junta mensagens picadas; 0 desliga
 
 
 class ToolsFile(BaseModel):
@@ -118,6 +134,7 @@ class ToolsFile(BaseModel):
     policy: PolicyTools = Field(default_factory=PolicyTools)
     rules: RulesTools = Field(default_factory=RulesTools)
     handoff: HandoffTools = Field(default_factory=HandoffTools)
+    canal: CanalTools = Field(default_factory=CanalTools)
 
 
 # --------------------------------------------------------------------------- tools do painel
@@ -283,6 +300,7 @@ def _code_defaults() -> dict[str, dict[str, Any]]:
                 "max_attempts": settings.quote_max_attempts,
                 "budget_s": settings.quote_budget_s,
                 "backoff_base_s": settings.quote_backoff_base_s,
+                "planos_ttl_s": 90.0,
             },
             "viacep": {"enabled": True, "url": settings.viacep_url, "timeout_s": settings.viacep_timeout_s},
             "policy": {
@@ -291,19 +309,25 @@ def _code_defaults() -> dict[str, dict[str, Any]]:
                 "objecoes_ate_handoff": 2,
                 "plano_padrao": "essencial",
                 "max_veiculos": 3,
+                "max_indisponivel": 3,
+                "max_midias": 3,
             },
             "rules": {"pre_validacao_local": True},
             "handoff": {
+                # `auto_assumir` sem ninguém avisado é o agente calando sozinho: o default
+                # efetivo é calculado em `effective()`, não aqui (depende de outras chaves).
                 "auto_assumir": True,
                 "consultor_number": settings.consultor_number,
                 "webhook_url": None,
                 "webhook_headers": {},
                 "studio_url": "http://127.0.0.1:8765",
+                "auto_devolver_apos_min": 240,
             },
+            "canal": {"max_respostas_por_minuto": 6, "debounce_s": 2.0},
         },
         "settings": {
             "gemini_model": settings.gemini_model,
-            "responder_history_runs": 8,
+            "responder_history_runs": 4,
             "extractor_temperature": 0.0,
             "responder_temperature": 0.4,
             "llm_max_tentativas": 4,
@@ -584,9 +608,23 @@ class ConfigStore:
             raise ConfigError(f"caminho desconhecido: {path}")
         if override is not _MISSING:
             return {"value": override, "origem": "override", "default": default}
+        if path == AUTO_ASSUMIR:
+            default = self._auto_assumir_default()
         env = _ENV_BACKED.get(path)
         origem = f"env:{env}" if env and os.getenv(env) is not None else "default"
         return {"value": default, "origem": origem, "default": default}
+
+    def _auto_assumir_default(self) -> bool:
+        """Assumir a conversa sem NENHUM canal de aviso configurado silencia o agente para
+        um lead que ninguém vai atender. Sem `consultor_number` e sem `webhook_url`, o
+        padrão é não assumir; configurar qualquer um dos dois liga de volta. Override
+        explícito continua mandando (quem escreveu `true` sabe o que quer).
+        """
+        try:
+            avisos = self.param("tools.handoff.consultor_number") or self.param("tools.handoff.webhook_url")
+        except ConfigError:
+            return False
+        return bool(avisos)
 
     def snapshot(self) -> dict[str, Any]:
         """Tudo efetivo, com origem, para a UI: {tools: {grupo: {chave: {value, origem, default}}}, settings: {...}}."""

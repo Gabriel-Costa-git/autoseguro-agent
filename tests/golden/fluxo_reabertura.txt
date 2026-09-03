@@ -1,0 +1,15 @@
+# fluxo_reabertura
+lead: tenho 35 anos
+  agente [template]: *Essencial* — colisão, roubo e furto · franquia R$ 4.500,00
+    *Completo* — colisão, roubo, furto, danos a terceiros e vidros · franquia R$ 3.000,00
+    *Premium* — colisão, roubo, furto, danos a terceiros, vidros e carro reserva · franquia R$ 1.500,00
+    Qual deles quer cotar?
+lead: o completo
+  agente [template]: Qual o modelo e o ano de fabricação do carro?
+lead: é um Corsa 2001
+  agente [template]: Vou ser sincero: não temos um plano que se encaixe no seu perfil, porque só conseguimos cotar veículos fabricados a partir de 2006.
+    Agradeço o contato e espero te atender numa próxima!
+lead: então cota pro meu outro carro, um Onix 2019
+  agente [llm]: [llm] pergunte o CEP de onde o carro dorme à noite (contexto: o lead corrigiu o ano do carro e agora está dentro do que a gente aceita; agradeça a correção e siga)
+
+estado: stage=coleta_cep handoff=- cep_ausente=False data_assumida=False chamadas_extractor=4

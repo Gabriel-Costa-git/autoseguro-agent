@@ -759,13 +759,20 @@ function lerCampo(id, def) {
 // Lista à esquerda (builtin + tools criadas no painel) e detalhe à direita. As tools novas moram
 // em `/api/custom-tools`; enquanto essa rota não existir, a aba funciona só com as builtin.
 // `handoff` só aparece quando `/api/effective` traz o grupo (o backend está criando nesta frente)
-const TOOLS_BUILTIN = ["quote_client", "viacep", "handoff"];
+const TOOLS_BUILTIN = ["quote_client", "viacep", "handoff", "canal"];
 
 const CAMPOS_HANDOFF = [
   { key: "auto_assumir", label: "Assumir a conversa automaticamente no handoff", type: "switch", wide: true },
   { key: "consultor_number", label: "WhatsApp do consultor (só dígitos com DDI)", type: "text" },
   { key: "studio_url", label: "URL do Studio (base do link no aviso)", type: "text" },
   { key: "webhook_url", label: "Webhook (POST JSON a cada handoff)", type: "text", wide: true },
+  { key: "auto_devolver_apos_min", label: "Devolver ao agente após (min sem mensagem humana)", type: "number" },
+];
+
+// freios do canal WhatsApp — existem por causa do loop de 02/09 (23 respostas em 80 s)
+const CAMPOS_CANAL = [
+  { key: "max_respostas_por_minuto", label: "Máx. de respostas por minuto (por conversa)", type: "number" },
+  { key: "debounce_s", label: "Debounce (s) — junta mensagens picadas; 0 desliga", type: "number", step: "0.5" },
 ];
 
 const CAMPOS_VIACEP = [
@@ -970,6 +977,10 @@ const Tools = {
     }
     if (this.sel === "handoff") {
       box.append(this.cardHandoff(), this.blocoSlots("handoff"));
+      return;
+    }
+    if (this.sel === "canal") {
+      box.append(fichaTools("canal", "canal", CAMPOS_CANAL, this.effective, () => this.load(this.sel)));
       return;
     }
     const tool = this.tool(this.sel);

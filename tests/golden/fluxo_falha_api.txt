@@ -1,0 +1,18 @@
+# fluxo_falha_api
+lead: tenho 35 anos
+  agente [template]: *Essencial* — colisão, roubo e furto · franquia R$ 4.500,00
+    *Completo* — colisão, roubo, furto, danos a terceiros e vidros · franquia R$ 3.000,00
+    *Premium* — colisão, roubo, furto, danos a terceiros, vidros e carro reserva · franquia R$ 1.500,00
+    Qual deles quer cotar?
+lead: o completo
+  agente [template]: Qual o modelo e o ano de fabricação do carro?
+lead: Onix 2019
+  agente [template]: Qual o CEP de onde o carro dorme à noite?
+lead: 01310-100
+  agente [template]: Achei aqui: 01310-100 — São Paulo/SP. É aí que o carro fica?
+lead: sim
+  agente [template]: Quer que o seguro comece hoje ou em outra data?
+lead: hoje mesmo
+  agente [template]: Nosso sistema de cotação está instável agora e eu não vou te passar um valor chutado. Guardei seus dados e um consultor te retorna com o valor certo.
+
+estado: stage=handoff handoff=cotacao_indisponivel cep_ausente=False data_assumida=False chamadas_extractor=4

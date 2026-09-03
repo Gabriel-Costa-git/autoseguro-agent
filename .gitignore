@@ -2,12 +2,13 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.ruff_cache/
+.DS_Store
 .env
 logs/*.jsonl
 !logs/.gitkeep
 !logs/entrega/
 data/
-.orq/
 logs/studio/
 
 # Config versionada = prompts/tools/settings. Estes dois nascem em runtime e são

@@ -21,22 +21,30 @@ WA = "wa-5511999990000"
 
 
 class FakeSender:
-    """Registra o que seria enviado pela Evolution."""
+    """Registra o que seria enviado pela Evolution.
 
-    def __init__(self) -> None:
+    `entregue` imita o contrato novo do `EvolutionSender`: `False` é recusa (número
+    inválido, instância desconectada) e `None` é o sender antigo, que não devolvia nada.
+    """
+
+    def __init__(self, entregue: bool | None = None) -> None:
         self.enviadas: list[tuple[str, str]] = []
+        self.entregue = entregue
 
-    async def send_text(self, number: str, text: str) -> None:
+    async def send_text(self, number: str, text: str) -> bool | None:
         self.enviadas.append((number, text))
+        return self.entregue
 
 
 async def _fake_conversation_factory():
     raise AssertionError("as rotas de atendimentos não montam conversa")
 
 
-def _linha(ts: str, event: str, message_id: str = "m1", **data) -> str:
+def _linha(ts: str, event: str, message_id: str = "m1", cid: str = WA, **data) -> str:
+    """Formato do `ConversationLogger`: o `conversation_id` de dentro é o id de verdade
+    (o nome do arquivo pode ser o hasheado, ver `pii.nome_arquivo_log`)."""
     return json.dumps(
-        {"ts": ts, "conversation_id": "x", "event": event, "message_id": message_id,
+        {"ts": ts, "conversation_id": cid, "event": event, "message_id": message_id,
          "quote_id": None, "data": data},
         ensure_ascii=False,
     )
@@ -56,7 +64,7 @@ def studio(tmp_path):
         encoding="utf-8",
     )
     (logs / "cli-1.jsonl").write_text(
-        _linha("2026-09-01T09:00:00+00:00", "inbound", text="oi", media_type="text") + "\n",
+        _linha("2026-09-01T09:00:00+00:00", "inbound", cid="cli-1", text="oi", media_type="text") + "\n",
         encoding="utf-8",
     )
 
@@ -190,3 +198,52 @@ def test_sem_evolution_configurada_400(studio, monkeypatch):
     resp = client.post(f"/api/atendimentos/{WA}/mensagens", json={"text": "oi"})
     assert resp.status_code == 400
     assert "Evolution" in resp.json()["detail"]
+
+
+# --------------------------------------------------------------------------- envio que falhou
+def test_envio_recusado_pela_evolution_vira_502_e_nao_entra_no_log(studio):
+    """Gravar `outbound source="humano"` de mensagem que não saiu é a mesma mentira que a
+    F9 corrigiu no aviso ao consultor: o operador acharia que respondeu."""
+    client, _ = studio
+    client.app.state.evolution_sender = FakeSender(entregue=False)
+    client.post(f"/api/atendimentos/{WA}/assumir")
+
+    resp = client.post(f"/api/atendimentos/{WA}/mensagens", json={"text": "Oi, aqui é a Ana"})
+
+    assert resp.status_code == 502
+    assert "não foi entregue" in resp.json()["detail"].lower()
+    eventos = client.get(f"/api/atendimentos/{WA}").json()["eventos"]
+    assert [e["event"] for e in eventos if e["event"] == "outbound" and e["data"].get("source") == "humano"] == []
+
+
+def test_envio_confirmado_vira_outbound_humano(studio):
+    client, _ = studio
+    client.app.state.evolution_sender = FakeSender(entregue=True)
+    client.post(f"/api/atendimentos/{WA}/assumir")
+
+    assert client.post(f"/api/atendimentos/{WA}/mensagens", json={"text": "oi"}).status_code == 200
+    eventos = client.get(f"/api/atendimentos/{WA}").json()["eventos"]
+    assert eventos[-1]["data"] == {"text": "oi", "source": "humano"}
+
+
+def test_mensagem_do_operador_reinicia_o_relogio_da_devolucao_automatica(studio):
+    """Sem isto, uma conversa bem atendida pelo painel volta ao agente 4 h depois do handoff."""
+    client, _ = studio
+    takeover = client.app.state.takeover
+    client.post(f"/api/atendimentos/{WA}/assumir")
+    assert takeover.listar()[WA]["ultima_humana"] is None
+
+    client.post(f"/api/atendimentos/{WA}/mensagens", json={"text": "já te respondo"})
+
+    assert takeover.listar()[WA]["ultima_humana"] is not None
+
+
+def test_envio_recusado_nao_reinicia_o_relogio(studio):
+    client, _ = studio
+    client.app.state.evolution_sender = FakeSender(entregue=False)
+    takeover = client.app.state.takeover
+    client.post(f"/api/atendimentos/{WA}/assumir")
+
+    client.post(f"/api/atendimentos/{WA}/mensagens", json={"text": "oi"})
+
+    assert takeover.listar()[WA]["ultima_humana"] is None

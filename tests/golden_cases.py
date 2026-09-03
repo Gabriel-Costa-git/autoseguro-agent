@@ -72,6 +72,20 @@ def casos() -> dict[str, str]:
         acoes[f"presenter_handoff_{r.value}_sem_nome"] = (Handoff(reason=r, payload={}), st_sem_nome)
     out = {nome: presenter.render(acao, s) for nome, (acao, s) in acoes.items()}
 
+    # Mesmos blocos, marcação do canal: no CLI e no Lab o `*negrito*` do WhatsApp sairia
+    # como asterisco na tela. O canal sai do `state.origem` quando ninguém passa `canal`.
+    for canal in ("cli", "lab"):
+        out[f"presenter_present_completo_{canal}"] = presenter.render(
+            Present(result=res, cep_ausente=False), st, canal=canal
+        )
+        out[f"presenter_ask_plan_{canal}"] = presenter.render(AskPlan(planos=planos), st, canal=canal)
+    out["presenter_ask_plan_por_origem_whatsapp"] = presenter.render(
+        AskPlan(planos=planos), st.model_copy(update={"origem": "whatsapp:principal"})
+    )
+    out["presenter_ask_plan_por_origem_cli"] = presenter.render(
+        AskPlan(planos=planos), st.model_copy(update={"origem": "cli"})
+    )
+
     st_ext = LeadState(
         conversation_id="g", idade=35, veiculo_texto="Onix 2022", veiculo_ano=2022, cep="01310100",
         cep_info=CepInfo(cep="01310100", existe=True, cidade="São Paulo", uf="SP"),

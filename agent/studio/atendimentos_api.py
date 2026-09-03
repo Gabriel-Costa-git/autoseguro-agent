@@ -12,7 +12,9 @@ montado das settings — se a Evolution não estiver configurada, a rota devolve
 de fingir que enviou.
 
 Este módulo não decide nada do agente: lê log, marca/desmarca takeover e registra o que
-o humano enviou como um `outbound` com `source="humano"` no mesmo log da conversa.
+o humano enviou como um `outbound` com `source="humano"` no mesmo log da conversa — e só
+depois de a Evolution confirmar. Registrar envio que não saiu é a mesma mentira que a F9
+corrigiu no aviso ao consultor.
 """
 from __future__ import annotations
 
@@ -103,13 +105,19 @@ def construir_router() -> APIRouter:
             raise HTTPException(status_code=400, detail="assuma a conversa antes de enviar mensagem")
 
         sender = _sender(request)
-        await sender.send_text(_number_from_conversation_id(cid), texto)
+        if await sender.send_text(_number_from_conversation_id(cid), texto) is False:
+            # `False` é a Evolution recusando (número inválido, instância desconectada).
+            # Sender antigo devolve `None` e continua valendo como enviado.
+            raise HTTPException(status_code=502, detail="a Evolution recusou o envio; a mensagem NÃO foi entregue")
         ConversationLogger(_catalogo(request).log_dir, cid).event(
             "outbound",
             message_id=f"h-{uuid.uuid4().hex[:8]}",
             text=texto,
             source="humano",
         )
+        # Humano falou: reinicia o relógio da devolução automática (`auto_devolver_apos_min`),
+        # senão uma conversa bem atendida pelo painel volta ao agente no meio do atendimento.
+        _takeover(request).registrar_humano(cid)
         return {"ok": True}
 
     return api

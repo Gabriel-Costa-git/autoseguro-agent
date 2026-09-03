@@ -43,14 +43,14 @@ def test_todo_slot_do_codigo_existe_com_default_igual(store: ConfigStore) -> Non
 def test_tools_e_settings_sem_override_vem_do_codigo(store: ConfigStore) -> None:
     ef = store.effective("tools.quote_client.timeout_s")
     assert ef["value"] == 3.5 and ef["origem"] in ("default", "env:QUOTE_TIMEOUT_S")
-    assert store.param("settings.responder_history_runs") == 8
+    assert store.param("settings.responder_history_runs") == 4
     assert store.param("tools.rules.pre_validacao_local") is True
     assert store.param("tools.viacep.enabled") is True
 
 
 def test_snapshot_cobre_todas_as_chaves(store: ConfigStore) -> None:
     snap = store.snapshot()
-    assert set(snap["tools"]) == {"quote_client", "viacep", "policy", "rules", "handoff"}
+    assert set(snap["tools"]) == {"quote_client", "viacep", "policy", "rules", "handoff", "canal"}
     assert "gemini_model" in snap["settings"]
     assert snap["tools"]["quote_client"]["timeout_s"]["default"] == 3.5
 

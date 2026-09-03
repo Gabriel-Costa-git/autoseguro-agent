@@ -37,7 +37,14 @@ from agent.models import (
     VeiculoExtraido,
     Violation,
 )
-from agent.policy import DIRETIVA_POS_COTACAO, TXT_INSTABILIDADE, TXT_MIDIA, next_action
+from agent.policy import (
+    DIRETIVA_POS_COTACAO,
+    TXT_CEP_AUSENTE,
+    TXT_INSTABILIDADE,
+    TXT_MIDIA,
+    TXT_MIDIA_2,
+    next_action,
+)
 from agent.runtime_config import ConfigStore
 
 HOJE = date(2026, 9, 1)
@@ -82,6 +89,9 @@ class FakeRules:
 
     def validate_request(self, req: QuoteRequest) -> list[Violation]:
         return []
+
+    def plano_ids(self) -> list[str]:
+        return [p.id for p in self.planos_resumo()]
 
     def planos_resumo(self) -> list[PlanoResumo]:
         return [
@@ -139,7 +149,7 @@ def _result(outcome: QuoteOutcome = QuoteOutcome.OK, **kw) -> QuoteResult:
 
 
 def _completo(**kw) -> LeadState:
-    """Estado com tudo coletado, pronto para cotar."""
+    """Estado com tudo coletado, pronto para cotar (a data é o último campo da coleta)."""
     base = {
         "idade": 35,
         "veiculo_ano": 2019,
@@ -147,6 +157,8 @@ def _completo(**kw) -> LeadState:
         "cep": "01001000",
         "cep_confirmado": True,
         "plano_id": "completo",
+        "data_inicio": HOJE,
+        "data_perguntada": True,
     }
     base.update(kw)
     return _state(**base)
@@ -199,18 +211,24 @@ def test_caminho_feliz_turno_a_turno():
     s, acoes = _act(s, None)
     assert acoes == [ConfirmCep(cep="01001000", cidade="São Paulo", uf="SP")]
 
+    # A data é o ÚLTIMO campo da coleta: sem ela, o pro-rata do 1º mês apareceria sem ninguém
+    # ter falado de data (o "pro-rata fantasma" da auditoria).
     s, acoes = _act(s, _extr(intent=Intent.CONFIRMAR))
+    assert acoes == [AskField(campo="data_inicio", motivo=None)]
+    assert s.stage is Stage.COLETA_DATA and s.data_perguntada is True
+
+    s, acoes = _act(s, _extr(data_inicio=date(2026, 9, 20)))
     assert acoes == [
         DoQuotes(
             requests=[
                 QuoteRequest(
                     plano_id="completo", idade=35, veiculo_ano=2019, cep="01001000",
-                    data_inicio="2026-09-01",
+                    data_inicio="2026-09-20",
                 )
             ]
         )
     ]
-    assert s.stage is Stage.COTANDO
+    assert s.stage is Stage.COTANDO and s.data_assumida is False
 
 
 def test_dado_fora_de_ordem_e_absorvido():
@@ -262,14 +280,39 @@ def test_cep_invalido_pede_de_novo_e_conta_tentativa():
     assert s.cep is None
 
 
-def test_cep_invalido_tres_vezes_segue_sem_cep():
+def test_cep_invalido_no_teto_segue_sem_cep_avisando():
+    """`max_cep_tentativas` é o número de turnos, e a comparação é `>=`: no 2º, já segue."""
     s = _state(idade=35, veiculo_ano=2019, stage=Stage.COLETA_CEP)
-    for _ in range(settings.max_cep_tentativas):
+    for _ in range(settings.max_cep_tentativas - 1):
         s, acoes = _act(s, _extr(cep="abc"))
         assert isinstance(acoes[0], AskField)
     s, acoes = _act(s, _extr(cep="abc"))
-    assert isinstance(acoes[0], AskPlan)
+    assert acoes[0] == SendText(text=TXT_CEP_AUSENTE)   # "sigo sem o CEP; o valor pode variar"
+    assert isinstance(acoes[1], AskPlan)
     assert s.cep_ausente is True
+
+
+def test_resposta_que_nao_traz_cep_tambem_conta_tentativa():
+    """Cenário s07a da auditoria: "123", "abc" e depois "essencial" — e o agente cotava o CEP 3x."""
+    s = _state(idade=35, veiculo_texto="Onix 2020", veiculo_ano=2020, veiculos=[
+        VeiculoColetado(texto="Onix 2020", ano=2020)
+    ], stage=Stage.COLETA_CEP, ultima_pergunta="cep")
+
+    s, acoes = _act(s, _extr(cep="123"))
+    assert acoes == [AskField(campo="cep", motivo="formato inválido")]
+    assert s.cep_tentativas == 1
+
+    s, acoes = _act(s, _extr(cep="abc"))
+    assert acoes[0] == SendText(text=TXT_CEP_AUSENTE)
+    assert s.cep_ausente is True and s.cep_tentativas == 2
+
+    s, acoes = _act(s, _extr(intent=Intent.ESCOLHER_PLANO, plano_id="essencial"))
+    assert isinstance(acoes[0], AskField) and acoes[0].campo == "data_inicio"
+
+    s, acoes = _act(s, _extr(data_vaga=True))
+    assert isinstance(acoes[0], DoQuotes)          # cota, e sem CEP
+    assert acoes[0].requests[0].cep is None
+    assert s.data_assumida is True
 
 
 def test_cep_inexistente_pede_de_novo_e_depois_segue_com_o_informado():
@@ -280,7 +323,7 @@ def test_cep_inexistente_pede_de_novo_e_depois_segue_com_o_informado():
         stage=Stage.CONFIRMA_CEP,
         cep_info=CepInfo(cep="99999999", existe=False),
     )
-    for _ in range(settings.max_cep_tentativas):
+    for _ in range(settings.max_cep_tentativas - 1):
         s, acoes = _act(s, None)
         assert acoes == [AskField(campo="cep", motivo="não encontrei esse CEP; pedir de novo")]
         s.stage = Stage.CONFIRMA_CEP  # o conversation re-chama após novo lookup
@@ -383,6 +426,34 @@ def test_midia_sem_texto_pede_texto():
     assert s.stage is Stage.INICIO
 
 
+def test_midia_repetida_muda_o_texto_e_na_terceira_chama_gente():
+    """Insistir no MESMO pedido três vezes é o beco que a auditoria achou no s12."""
+    s = _state()
+    s, acoes = _act(s, None)
+    assert acoes[0] == SendText(text=TXT_MIDIA)
+
+    s, acoes = _act(s, None)
+    assert acoes[0] == SendText(text=TXT_MIDIA_2)      # "prefiro por escrito, não consigo ouvir"
+
+    s, acoes = _act(s, None)
+    assert isinstance(acoes[0], Handoff)
+    assert acoes[0].reason is HandoffReason.SEM_PROGRESSO
+    # O texto do handoff por mídia é outro: quem renderiza é o presenter, pelo slot indicado.
+    assert acoes[0].payload["texto_slot"] == "presenter.handoff.so_midia"
+    assert s.stage is Stage.HANDOFF
+
+
+def test_texto_no_meio_zera_a_contagem_de_midia():
+    s = _state()
+    s, _ = _act(s, None)
+    s, _ = _act(s, None)
+    assert s.midias == 2
+    s, _ = _act(s, _extr(idade=35))
+    assert s.midias == 0
+    s, acoes = _act(s, None)
+    assert acoes[0] == SendText(text=TXT_MIDIA)        # volta ao 1º texto, não ao handoff
+
+
 def test_sem_progresso_escala_para_humano():
     s = _state()
     for _ in range(settings.max_turnos_sem_progresso - 1):
@@ -403,12 +474,47 @@ def test_dado_novo_zera_o_contador_de_estagnacao():
 
 
 @pytest.mark.parametrize("stage", [Stage.HANDOFF, Stage.ENCERRADO, Stage.ENCERRADO_RECUSA])
-def test_estados_terminais_nao_reabrem_coleta(stage: Stage):
-    s, acoes = _act(_state(stage=stage), _extr(idade=35))
+def test_estados_terminais_nao_reabrem_com_mensagem_sem_conteudo(stage: Stage):
+    """Sem sinal de que o lead quer cotar, o terminal continua terminal."""
+    s, acoes = _act(_state(stage=stage), _extr(intent=Intent.OUTRO))
     assert len(acoes) == 1
     assert isinstance(acoes[0], SendText)
     assert s.stage is stage
-    assert s.idade is None
+    assert s.terminal_avisado is True
+
+
+def test_handoff_nao_reabre_nem_com_dado_novo():
+    """No handoff já tem um consultor no caso: reabrir por trás dele seria pior que não responder."""
+    s, acoes = _act(_state(stage=Stage.HANDOFF), _extr(idade=35))
+    assert isinstance(acoes[0], SendText)
+    assert s.stage is Stage.HANDOFF and s.idade is None
+
+
+@pytest.mark.parametrize("stage", [Stage.ENCERRADO, Stage.ENCERRADO_RECUSA])
+def test_encerrado_reabre_com_dado_novo(stage: Stage):
+    s, acoes = _act(_state(stage=stage), _extr(idade=35))
+    assert isinstance(acoes[0], AskPlan)
+    assert s.idade == 35 and s.stage is Stage.ESCOLHA_PLANO
+
+
+def test_terminal_responde_uma_vez_e_depois_silencia():
+    """O incidente do WhatsApp: 23 eventos de protocolo viraram 23 mensagens iguais."""
+    s = _state(stage=Stage.HANDOFF)
+    s, acoes = _act(s, _extr(intent=Intent.OUTRO))
+    assert isinstance(acoes[0], SendText) and s.terminal_avisado is True
+    for _ in range(3):
+        s, acoes = _act(s, _extr(intent=Intent.OUTRO))
+        assert acoes == []
+
+
+def test_reabertura_por_outro_carro_apaga_o_carro_recusado():
+    """"quero cotar outro carro" depois da recusa: pergunta o carro, não recota o recusado."""
+    s, _ = _act(_state(idade=35, plano_id="completo"), _extr(veiculo_ano=2005, veiculo_texto="Corsa 2005"))
+    assert s.stage is Stage.ENCERRADO_RECUSA and s.recusa_campo == "veiculo_ano"
+
+    s, acoes = _act(s, _extr(intent=Intent.FORNECER_DADOS))
+    assert s.veiculos == []
+    assert isinstance(acoes[0], AskField) and acoes[0].campo == "veiculo"
 
 
 # --------------------------------------------------------------------------- pós-cotação
@@ -574,14 +680,24 @@ def test_indisponivel_nao_absorve_nem_obedece_o_que_veio_junto():
 
 
 def test_indisponivel_repetido_escala_para_humano():
+    """3 extrações falhas seguidas: o problema é NOSSO, e o motivo diz isso ao consultor."""
     s = _completo(stage=Stage.ESCOLHA_PLANO, plano_id=None)
-    for _ in range(settings.max_turnos_sem_progresso - 1):
+    for _ in range(2):
         s, acoes = _act(s, _indisponivel())
         assert isinstance(acoes[0], SendText)
     s, acoes = _act(s, _indisponivel())
     assert isinstance(acoes[0], Handoff)
-    assert acoes[0].reason is HandoffReason.SEM_PROGRESSO
+    assert acoes[0].reason is HandoffReason.SISTEMA_INSTAVEL
     assert s.stage is Stage.HANDOFF
+
+
+def test_uma_extracao_boa_zera_o_contador_de_instabilidade():
+    s = _completo(stage=Stage.ESCOLHA_PLANO, plano_id=None)
+    s, _ = _act(s, _indisponivel())
+    s, _ = _act(s, _indisponivel())
+    assert s.indisponiveis == 2
+    s, _ = _act(s, _extr(intent=Intent.ESCOLHER_PLANO, plano_id="completo"))
+    assert s.indisponiveis == 0
 
 
 @pytest.mark.parametrize("stage", [Stage.HANDOFF, Stage.ENCERRADO, Stage.ENCERRADO_RECUSA])
@@ -627,7 +743,8 @@ def test_diretiva_de_objecao_tambem_vem_do_slot(store_tmp):
 def test_max_cep_tentativas_zero_segue_sem_cep_na_primeira_falha(store_tmp):
     store_tmp.set_overrides("tools", {"policy": {"max_cep_tentativas": 0}})
     s, acoes = _act(_state(idade=35, veiculo_ano=2019, stage=Stage.COLETA_CEP), _extr(cep="abc"))
-    assert isinstance(acoes[0], AskPlan)
+    assert acoes[0] == SendText(text=TXT_CEP_AUSENTE)
+    assert isinstance(acoes[1], AskPlan)
     assert s.cep_ausente is True
 
 
@@ -851,7 +968,7 @@ def _carros(*pares) -> Extraction:
 
 
 def test_dois_carros_viram_dois_requests_do_mesmo_plano():
-    estado = _state(idade=35, plano_id="completo", cep="01001000", cep_confirmado=True)
+    estado = _state(idade=35, plano_id="completo", cep="01001000", cep_confirmado=True, data_inicio=HOJE)
     s, acoes = _act(estado, _carros(("Onix 2022", 2022), ("HB20 2020", 2020)))
 
     assert [(v.texto, v.ano) for v in s.veiculos] == [("Onix 2022", 2022), ("HB20 2020", 2020)]
@@ -873,7 +990,7 @@ def test_carro_sem_ano_segura_a_cotacao_e_diz_qual_e():
 
 
 def test_ano_informado_depois_completa_o_carro_certo():
-    estado = _state(idade=35, plano_id="completo", cep="01001000", cep_confirmado=True)
+    estado = _state(idade=35, plano_id="completo", cep="01001000", cep_confirmado=True, data_inicio=HOJE)
     s, _ = _act(estado, _carros(("Onix 2022", 2022), ("HB20", None)))
     s, acoes = _act(s, _extr(veiculos=[VeiculoExtraido(texto="HB20", ano=2020)]))
 

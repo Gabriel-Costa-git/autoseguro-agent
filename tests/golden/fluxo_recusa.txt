@@ -1,0 +1,8 @@
+# fluxo_recusa
+lead: tenho 90 anos
+  agente [template]: Vou ser sincero: não temos um plano que se encaixe no seu perfil, porque só conseguimos cotar para condutores de 18 a 75 anos.
+    Agradeço o contato e espero te atender numa próxima!
+lead: que pena
+  agente [template]: Esse atendimento já foi encerrado por aqui. Se quiser retomar, é só chamar que um consultor te ajuda.
+
+estado: stage=encerrado_recusa handoff=- cep_ausente=False data_assumida=False chamadas_extractor=2

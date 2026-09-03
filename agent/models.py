@@ -2,7 +2,7 @@
 Contratos compartilhados do agente AutoSeguro.
 
 Este módulo é o ponto de acoplamento entre as camadas. Regras:
-- Editado só pelo orquestrador este arquivo. Executores pedem mudança no reporte.
+- Editado só pelo orquestrador; executores pedem mudança no reporte.
 - Tudo aqui é dado puro (Pydantic/Enum). Sem I/O, sem LLM, sem HTTP.
 - O LLM só produz `Extraction`. Quem decide é `policy.next_action`, que
   devolve `Action`s. Preço só existe dentro de `Quote`, que só nasce da API.
@@ -11,7 +11,8 @@ Assinaturas esperadas (implementadas nos módulos indicados):
 
   quote_client.QuoteClient(base_url, timeout_s=3.5, max_attempts=4, budget_s=15.0,
                            transport=None, sleep=asyncio.sleep, clock=time.monotonic)
-      async get_planos() -> dict                 # cacheado após o 1º sucesso
+      async get_planos() -> dict                 # cacheado com TTL; levanta só sem cópia nenhuma
+      async planos() -> PlanosSnapshot           # {planos, origem: http|cache|stale, obtido_em, erro}
       async quote(req: QuoteRequest, on_slow: Callable[[], Awaitable[None]] | None = None) -> QuoteResult
 
   rules.Rules.from_planos(planos: dict, today: date) -> Rules
@@ -19,8 +20,9 @@ Assinaturas esperadas (implementadas nos módulos indicados):
       validate_veiculo_ano(ano) -> Violation | None
       validate_data_inicio(d: date) -> Violation | None
       normalize_cep(texto: str) -> str | None    # 8 dígitos ou None
-      validate_request(req: QuoteRequest) -> list[Violation]
-      planos_resumo() -> list[PlanoResumo]
+      validate_request(req: QuoteRequest) -> list[Violation]   # chamada antes de `DoQuotes`
+      planos_resumo() -> list[PlanoResumo]       # filtra e loga plano malformado, não levanta
+      plano_ids() -> list[str]
 
   cep.lookup_cep(cep8: str, timeout_s=2.0, client: httpx.AsyncClient | None = None) -> CepInfo
 
@@ -40,7 +42,8 @@ Assinaturas esperadas (implementadas nos módulos indicados):
   brain.Responder.reply(directive: str, state: LeadState, inbound_text: str) -> str  # async
       (ambos implementam os Protocols LLMExtractor / LLMResponder abaixo; FakeLLM nos testes)
 
-  conversation.Conversation(rules, quote_client, extractor, responder, log_dir, store, today=date.today)
+  conversation.Conversation(rules, quote_client, extractor, responder, log_dir, store, today=date.today,
+                            rules_provider: Callable[[], Awaitable[Rules]] | None = None)
       async handle(inbound: Inbound, emit: Callable[[Outbound], Awaitable[None]]) -> LeadState
 """
 from __future__ import annotations
@@ -51,6 +54,8 @@ from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import BaseModel, Field
 
+# Ids que o LLM pode escolher (guarda-corpo do Extractor). O RESTO do sistema usa `str`:
+# quem manda é a lista corrente do `GET /planos`, validada em `rules.plano_ids()`.
 PlanoId = Literal["essencial", "completo", "premium"]
 CampoColeta = Literal["idade", "veiculo", "cep", "plano", "data_inicio"]
 
@@ -102,7 +107,7 @@ class Extraction(BaseModel):
 
 # --------------------------------------------------------------------------- API de cotação
 class QuoteRequest(BaseModel):
-    plano_id: PlanoId
+    plano_id: str                         # validado contra `rules.plano_ids()`, não contra um Literal
     idade: int
     veiculo_ano: int
     cep: str | None = None                # 8 dígitos, sem hífen
@@ -168,7 +173,7 @@ class Violation(BaseModel):
 
 
 class PlanoResumo(BaseModel):
-    id: PlanoId
+    id: str                               # o que vier do /planos; `rules.planos_resumo()` filtra o malformado
     nome: str
     franquia: float
     coberturas: list[str]
@@ -189,6 +194,7 @@ class Stage(StrEnum):
     COLETA_CEP = "coleta_cep"
     CONFIRMA_CEP = "confirma_cep"
     ESCOLHA_PLANO = "escolha_plano"
+    COLETA_DATA = "coleta_data"           # último campo da coleta: quando a vigência começa
     COTANDO = "cotando"
     APRESENTADO = "apresentado"
     ENCERRADO_RECUSA = "encerrado_recusa"
@@ -204,6 +210,7 @@ class HandoffReason(StrEnum):
     FORA_DE_ESCOPO = "fora_de_escopo"
     NEGOCIACAO = "negociacao"                     # insiste em desconto/condição
     SEM_PROGRESSO = "sem_progresso"               # N turnos sem avançar a coleta
+    SISTEMA_INSTAVEL = "sistema_instavel"         # o LLM não leu a mensagem N vezes seguidas
 
 
 class VeiculoColetado(BaseModel):
@@ -236,17 +243,24 @@ class LeadState(BaseModel):
     cep: str | None = None                # 8 dígitos
     cep_info: CepInfo | None = None
     cep_confirmado: bool = False
+    cep_confirmacao_pedida: bool = False  # o ConfirmCep já saiu: o próximo `None` é mídia, não re-entrada
     cep_tentativas: int = 0
     cep_ausente: bool = False             # lead não sabe → cota sem CEP, avisar "pode subir"
-    plano_id: PlanoId | None = None
+    plano_id: str | None = None           # id do /planos (o Literal é só do Extractor)
     plano_perguntado: bool = False        # a pergunta do plano já foi feita (não se repete)
     plano_assumido: bool = False          # o lead não escolheu; a policy assumiu o padrão
     data_inicio: date | None = None       # None → hoje na hora de cotar
+    data_perguntada: bool = False         # a pergunta da data já foi feita (não se repete)
+    data_assumida: bool = False           # o lead não quis escolher; vigência a partir de hoje
     quote_result: QuoteResult | None = None   # espelho de `veiculos[0].quote_result`
     handoff_reason: HandoffReason | None = None
     recusa_campo: str | None = None       # campo que causou a recusa ("idade"/"veiculo_ano"): permite reabrir
     turnos: int = 0
     turnos_sem_progresso: int = 0
+    indisponiveis: int = 0                # extrações seguidas em que o LLM não leu a mensagem
+    midias: int = 0                       # mensagens de mídia seguidas (áudio/imagem/documento)
+    cep_neutros: int = 0                  # respostas neutras seguidas à confirmação de CEP
+    terminal_avisado: bool = False        # a frase do estado terminal já saiu uma vez
     objecoes: int = 0
     ultima_pergunta: CampoColeta | None = None
     origem: str | None = None             # canal de entrada: "whatsapp:<instância>", "cli", "lab"
@@ -282,6 +296,7 @@ class Present(BaseModel):
     kind: Literal["present"] = "present"
     result: QuoteResult                   # outcome == OK
     cep_ausente: bool = False
+    data_assumida: bool = False           # a data não foi escolhida: dizer "vigência a partir de hoje"
 
 
 class PresentMany(BaseModel):
@@ -290,6 +305,7 @@ class PresentMany(BaseModel):
     kind: Literal["present_many"] = "present_many"
     resultados: list[VeiculoColetado]     # na ordem em que o lead citou; cada um com sua cotação
     cep_ausente: bool = False
+    data_assumida: bool = False           # idem `Present`
 
 
 class Refuse(BaseModel):
@@ -371,8 +387,13 @@ class Outbound(BaseModel):
 # --------------------------------------------------------------------------- observabilidade
 EventKind = Literal[
     "inbound", "outbound", "extraction", "decision",
-    "quote_attempt", "quote_result", "cep_lookup",
+    "quote_attempt", "quote_result", "cep_lookup", "planos_refresh",
     "llm_call", "tool_call", "handoff", "handoff_notice", "refusal", "error",
+    # F11 — o que o log escondia: retry/erro do LLM, guardrail que apagou preço, refresh
+    # do /planos, saída que o canal NÃO entregou, takeover devolvido por inatividade e
+    # campo que veio da regex de fallback em vez do modelo.
+    "llm_retry", "llm_error", "llm_guard",
+    "outbound_suprimido", "takeover_expirado", "extraction_regex",
 ]
 
 
