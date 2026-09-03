@@ -2,7 +2,7 @@
 Contratos compartilhados do agente AutoSeguro.
 
 Este módulo é o ponto de acoplamento entre as camadas. Regras:
-- Editado só pelo orquestrador este arquivo. Executores pedem mudança no reporte.
+- Editado só pelo orquestrador; executores pedem mudança no reporte.
 - Tudo aqui é dado puro (Pydantic/Enum). Sem I/O, sem LLM, sem HTTP.
 - O LLM só produz `Extraction`. Quem decide é `policy.next_action`, que
   devolve `Action`s. Preço só existe dentro de `Quote`, que só nasce da API.
