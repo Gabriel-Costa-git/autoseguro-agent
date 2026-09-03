@@ -702,10 +702,13 @@ const Prompts = {
 // Uma célula por campo: rótulo + badge de origem + "voltar ao padrão" (só quando há override)
 // em cima, controle embaixo. As fichas são grades de 2 colunas; campo largo ocupa a linha toda.
 function campoHtml(id, def, campo, path) {
+  const limites = `${def.step ? ` step="${def.step}"` : ""}${def.min != null ? ` min="${def.min}"` : ""}${def.max != null ? ` max="${def.max}"` : ""}`;
   const controle =
     def.type === "switch"
       ? `<label class="switch"><input type="checkbox" id="${id}" ${campo.value ? "checked" : ""} /><span>${campo.value ? "ligado" : "desligado"}</span></label>`
-      : `<input type="${def.type}" id="${id}" value="${escapeHtml(campo.value ?? "")}" ${def.step ? `step="${def.step}"` : ""} />`;
+      : def.type === "select"
+        ? `<select id="${id}">${opcoesDoCampo(def, campo.value)}</select>`
+        : `<input type="${def.type}" id="${id}" value="${escapeHtml(campo.value ?? "")}"${limites} />`;
   return `<div class="field-cell${def.wide ? " wide" : ""}">
       <div class="field-head">
         <span class="field-label">${escapeHtml(def.label)}</span>
@@ -714,6 +717,13 @@ function campoHtml(id, def, campo, path) {
       ${controle}
       ${def.help ? `<span class="field-help">${escapeHtml(def.help)}</span>` : ""}
     </div>`;
+}
+
+/** Opções de um campo `select`; garante que o valor efetivo esteja na lista para não se perder ao salvar. */
+function opcoesDoCampo(def, atual) {
+  const opcoes = (def.opcoes || []).slice();
+  if (atual != null && atual !== "" && !opcoes.includes(atual)) opcoes.unshift(String(atual));
+  return opcoes.map((o) => `<option value="${escapeHtml(o)}"${o === atual ? " selected" : ""}>${escapeHtml(o)}</option>`).join("");
 }
 
 function botaoReset(path) {
@@ -752,6 +762,9 @@ const CAMPOS_POLICY = [
   { key: "max_turnos_sem_progresso", label: "Máx. turnos sem progresso", type: "number" },
   { key: "max_cep_tentativas", label: "Máx. tentativas de CEP", type: "number" },
   { key: "objecoes_ate_handoff", label: "Objeções até handoff", type: "number" },
+  // chegam com o backend desta frente; até lá, `fichaTools` não os desenha
+  { key: "plano_padrao", label: "Plano padrão quando o lead não escolhe", type: "select", opcoes: ["essencial", "completo", "premium"] },
+  { key: "max_veiculos", label: "Máx. de carros por cotação", type: "number", min: 1, max: 5 },
 ];
 const CAMPOS_RULES = [
   { key: "pre_validacao_local", label: "Pré-validação local", type: "switch", help: "valida idade, ano e CEP antes de chamar a API" },
@@ -776,7 +789,9 @@ const METODOS_HTTP = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 function fichaTools(grupo, titulo, campos, efetivo, recarregar) {
   const div = document.createElement("div");
   div.className = "card";
-  const celulas = campos.map((def) => campoHtml(`tool-${grupo}-${def.key}`, def, efetivo[grupo][def.key], `${grupo}/${def.key}`)).join("");
+  // campo que o backend ainda não expõe em /api/effective simplesmente não aparece (sem erro)
+  const presentes = campos.filter((def) => efetivo[grupo] && efetivo[grupo][def.key] !== undefined);
+  const celulas = presentes.map((def) => campoHtml(`tool-${grupo}-${def.key}`, def, efetivo[grupo][def.key], `${grupo}/${def.key}`)).join("");
   div.innerHTML = `<h3>${escapeHtml(titulo)}</h3>
     <div class="card-grid">${celulas}</div>
     <div class="card-actions"><button type="button" class="primary save-btn">Salvar</button></div>`;
@@ -796,7 +811,7 @@ function fichaTools(grupo, titulo, campos, efetivo, recarregar) {
     "click",
     withLoading(salvar, async () => {
       const patch = {};
-      for (const def of campos) {
+      for (const def of presentes) {
         const novo = lerCampo(`tool-${grupo}-${def.key}`, def);
         if (novo !== efetivo[grupo][def.key].value) patch[def.key] = novo;
       }
