@@ -84,6 +84,15 @@ def _resolver_env(texto: str, segredos: list[str]) -> str:
     return ENV_REF_RE.sub(troca, texto or "")
 
 
+def resolver_env(texto: str) -> str:
+    """`${env:X}` → valor do ambiente, com a MESMA regra das tools do painel.
+
+    Existe para o aviso de handoff (`agent/handoff.py`) não reimplementar a sintaxe: um segredo
+    referenciado em dois lugares tem de ser resolvido do mesmo jeito. Variável ausente é `ToolErro`.
+    """
+    return _resolver_env(texto, [])
+
+
 def _aplicar_args(texto: str, args: dict[str, Any], escapar: bool) -> str:
     """Substitui `{param}` pelos argumentos. Chave desconhecida fica literal (não estoura)."""
 

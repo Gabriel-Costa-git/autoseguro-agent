@@ -50,7 +50,7 @@ def test_tools_e_settings_sem_override_vem_do_codigo(store: ConfigStore) -> None
 
 def test_snapshot_cobre_todas_as_chaves(store: ConfigStore) -> None:
     snap = store.snapshot()
-    assert set(snap["tools"]) == {"quote_client", "viacep", "policy", "rules"}
+    assert set(snap["tools"]) == {"quote_client", "viacep", "policy", "rules", "handoff"}
     assert "gemini_model" in snap["settings"]
     assert snap["tools"]["quote_client"]["timeout_s"]["default"] == 3.5
 

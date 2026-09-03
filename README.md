@@ -70,6 +70,7 @@ canal (CLI | Evolution) ──Inbound──▶ conversation.handle
 | `scripts/export_ai_logs.py` | Exporta e higieniza as sessões de IA para `ai-logs/`. |
 | `agent/runtime_config.py`, `agent/defaults.py`, `config/` | Textos e parâmetros editáveis com versões, overrides e hot-reload (Studio). |
 | `agent/takeover.py`, `agent/atendimentos.py` | Quem responde cada conversa (`config/atendimentos.json`, lido também pelo `serve.py`) e o catálogo de atendimentos lido dos logs. |
+| `agent/handoff.py` | Avisa o consultor no handoff: assume a conversa, manda o resumo no WhatsApp e chama o webhook do CRM. |
 | `agent/tools_runtime.py` | Executa as tools criadas no painel (`http`/`sql`) e as entrega ao Responder como function calling; segredo só por `${env:X}`, SQL somente leitura. |
 | `agent/studio/` | Studio local: Atendimentos, Lab (Conversa · Prompts · Tools) e Config (FastAPI + estático, só 127.0.0.1). |
 
@@ -361,6 +362,32 @@ Como isso não altera o comportamento entregue:
 - `guard_price` não tem toggle. A formatação de preço e as listas continuam em código; os
   templates só recebem valores já formatados vindos da API.
 
+## Handoff (quando entra um humano)
+
+Quando a policy decide escalar (lead aceitou, pediu atendente, negociação, cotação indisponível,
+erro interno, fora de escopo, sem progresso), o lead recebe o texto de sempre — e, a partir da F9,
+**o outro lado também fica sabendo**. `agent/handoff.py` dispara três canais independentes, cada um
+desligável e cada um virando um evento `handoff_notice` (`{canal, status, destino}`) no JSONL da
+conversa:
+
+| Canal | O que faz | Configuração |
+|---|---|---|
+| `takeover` | marca a conversa como **humana** (`config/atendimentos.json`): o webhook passa a registrar o `inbound` com `modo="humano"` e o agente para de responder aquele lead | `tools.handoff.auto_assumir` (padrão ligado) |
+| `whatsapp` | manda ao consultor um resumo com motivo, nome, telefone, origem, dados coletados, **o preço de cada carro** e o link direto de Atendimentos | `tools.handoff.consultor_number` (vem de `CONSULTOR_NUMBER`) e `tools.handoff.studio_url` |
+| `webhook` | `POST` JSON para um CRM (`{conversation_id, origem, motivo, dados, cotacoes, link, ts}`), 5 s de timeout | `tools.handoff.webhook_url` e `tools.handoff.webhook_headers` (valores aceitam `${env:X}`) |
+
+Detalhes que importam:
+
+- **O aviso é o único texto com preço que não vai para o lead.** Ele é um slot
+  (`presenter.handoff.aviso_consultor`), editável no Studio, e os valores continuam vindo do
+  `Quote` da API pela mesma formatação da mensagem do lead — preço nasce num lugar só.
+- **Nada disso derruba o turno**: cada canal tem o seu try/except e o pior caso é um
+  `handoff_notice` com `status: "erro"`. Sem `CONSULTOR_NUMBER`/webhook, o status é `"desligado"`.
+- **Turno que quebrou também avisa**: o erro interno já era handoff, agora com aviso.
+- **No Lab nada sai**: a conversa de teste roda o notificador em modo `simulado` — o painel Eventos
+  mostra o texto que teria ido ao consultor, sem WhatsApp e sem marcar `lab-*` como assumida.
+- O telefone do consultor vai **mascarado** para o log; a URL do webhook aparece só como host.
+
 ## Limitações conhecidas
 - Estado da conversa em memória (`InMemoryStateStore`); um canal em produção trocaria por
   Redis/DB.
@@ -373,3 +400,6 @@ Como isso não altera o comportamento entregue:
   repetir algo que o operador já resolveu no meio.
 - O Studio **envia** pela Evolution quando o operador assume, mas não recebe webhook: as
   respostas do lead continuam chegando pelo `serve.py`, que as registra sem chamar o agente.
+- Depois de um handoff, **"Devolver ao agente" faz o agente voltar a responder** — e, como a etapa
+  está terminal, ele responde com o texto de encerramento ("um consultor já está com o seu caso").
+  Para retomar a coleta é preciso uma conversa nova.

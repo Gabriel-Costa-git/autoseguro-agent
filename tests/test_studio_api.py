@@ -199,6 +199,13 @@ def test_serve_nao_importa_studio():
     assert "studio" not in fonte.lower()
 
 
+def test_serve_monta_o_aviso_de_handoff_com_o_sender_e_o_takeover_reais():
+    """O canal é quem tem o WhatsApp e o takeover; sem este wiring o handoff volta a ser mudo."""
+    fonte = Path("agent/serve.py").read_text(encoding="utf-8")
+    assert "HandoffNotifier(sender=sender, takeover=takeover)" in fonte
+    assert "on_handoff=" in fonte
+
+
 def test_studio_main_usa_host_fixo_127_0_0_1():
     fonte = Path("agent/studio/__main__.py").read_text(encoding="utf-8")
     assert '"127.0.0.1"' in fonte

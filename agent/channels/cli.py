@@ -47,12 +47,13 @@ async def montar_conversa(
     base_url: str | None = None,
     trace: Callable[[dict], None] | None = None,
     logger_factory: Callable[..., object] | None = None,
+    on_handoff: Callable[..., object] | None = None,
 ) -> Conversation:
     """Carrega settings, exige a chave do LLM e deriva as regras do `/planos` da API.
 
     `base_url` (o Lab aponta cada sessão para uma API), `trace` (hook de observação das
-    chamadas ao LLM) e `logger_factory` são pontos de injeção do Studio; sem eles o boot
-    é exatamente o do canal de terminal e do webhook.
+    chamadas ao LLM), `logger_factory` e `on_handoff` (aviso ao consultor) são pontos de
+    injeção; sem eles o boot é exatamente o do canal de terminal — no CLI ninguém é avisado.
     """
     if not settings.google_api_key:
         raise BootError("GOOGLE_API_KEY não configurada. Copie .env.example para .env e preencha a chave.")
@@ -84,6 +85,7 @@ async def montar_conversa(
         store=InMemoryStateStore(),
         today=today,
         logger_factory=logger_factory,
+        on_handoff=on_handoff,
     )
 
 

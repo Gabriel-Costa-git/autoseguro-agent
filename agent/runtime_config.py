@@ -102,11 +102,22 @@ class RulesTools(BaseModel):
     pre_validacao_local: bool | None = None
 
 
+class HandoffTools(BaseModel):
+    """O que acontece quando a conversa vai para um humano (ver `agent/handoff.py`)."""
+
+    auto_assumir: bool | None = None            # marca a conversa como humana no takeover
+    consultor_number: str | None = None         # WhatsApp que recebe o aviso (env CONSULTOR_NUMBER)
+    webhook_url: str | None = None              # POST opcional para o CRM
+    webhook_headers: dict[str, str] | None = None   # valores aceitam `${env:X}`
+    studio_url: str | None = None               # base do link de Atendimentos no aviso
+
+
 class ToolsFile(BaseModel):
     quote_client: QuoteClientTools = Field(default_factory=QuoteClientTools)
     viacep: ViacepTools = Field(default_factory=ViacepTools)
     policy: PolicyTools = Field(default_factory=PolicyTools)
     rules: RulesTools = Field(default_factory=RulesTools)
+    handoff: HandoffTools = Field(default_factory=HandoffTools)
 
 
 # --------------------------------------------------------------------------- tools do painel
@@ -282,6 +293,13 @@ def _code_defaults() -> dict[str, dict[str, Any]]:
                 "max_veiculos": 3,
             },
             "rules": {"pre_validacao_local": True},
+            "handoff": {
+                "auto_assumir": True,
+                "consultor_number": settings.consultor_number,
+                "webhook_url": None,
+                "webhook_headers": {},
+                "studio_url": "http://127.0.0.1:8765",
+            },
         },
         "settings": {
             "gemini_model": settings.gemini_model,
@@ -307,6 +325,7 @@ _ENV_BACKED = {
     "tools.viacep.timeout_s": "VIACEP_TIMEOUT_S",
     "tools.policy.max_turnos_sem_progresso": "MAX_TURNOS_SEM_PROGRESSO",
     "tools.policy.max_cep_tentativas": "MAX_CEP_TENTATIVAS",
+    "tools.handoff.consultor_number": "CONSULTOR_NUMBER",
     "settings.gemini_model": "GEMINI_MODEL",
     "settings.agent_db_path": "AGENT_DB_PATH",
 }

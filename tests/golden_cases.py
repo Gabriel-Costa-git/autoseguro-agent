@@ -80,6 +80,14 @@ def casos() -> dict[str, str]:
     # `ferramentas=[]` = a configuração ENTREGUE (nenhuma tool no painel). Sem isso o golden
     # dependeria do `config/custom_tools.json` da máquina: uma tool ligada acrescenta o intent
     # `consulta` ao prompt DE PROPÓSITO, e o gate ficaria vermelho por causa de configuração.
+    # Aviso ao consultor (F9): é o único texto com preço que NÃO vai para o lead.
+    out["presenter_handoff_aviso_consultor"] = presenter.aviso_consultor(
+        st,
+        Handoff(reason=HandoffReason.LEAD_ACEITOU, payload={}),
+        telefone="5511999990000",
+        link="http://127.0.0.1:8765/#atendimentos/wa-5511999990000",
+    )
+
     out["brain_extractor_instructions"] = brain.build_extraction_instructions(st_ext, HOJE, ferramentas=[])
     out["brain_extractor_instructions_vazio"] = brain.build_extraction_instructions(
         LeadState(conversation_id="g"), HOJE, ferramentas=[]

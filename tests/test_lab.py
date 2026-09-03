@@ -47,7 +47,7 @@ def _fabrica(tmp_path, extracoes, respostas, status_quote=None):
             return httpx.Response(200, json=QUOTE_200)
         return httpx.Response(status, json={"error": "upstream_unavailable"})
 
-    async def montar(*, base_url=None, trace=None, logger_factory=None, **_kw):
+    async def montar(*, base_url=None, trace=None, logger_factory=None, on_handoff=None, **_kw):
         from agent.quote_client import QuoteClient
 
         client = QuoteClient(
@@ -66,6 +66,7 @@ def _fabrica(tmp_path, extracoes, respostas, status_quote=None):
             today=lambda: HOJE,
             lookup_cep=FakeCepLookup(CepInfo(cep="01310100", existe=True, cidade="São Paulo", uf="SP")),
             logger_factory=logger_factory,
+            on_handoff=on_handoff,
         )
 
     return montar
@@ -369,3 +370,52 @@ def test_resumir_state_mascara_pii_e_nao_inventa_preco():
     assert resumo["cep_cidade"] == "São Paulo"
     assert resumo["cotacao"] is None
     assert resumir_state(None) == {}
+
+
+# --------------------------------------------------------------------------- handoff simulado (F9)
+def test_handoff_no_lab_e_simulado_e_aparece_nos_eventos(tmp_path, monkeypatch):
+    """Conversa de teste não manda WhatsApp para o consultor nem marca takeover — só mostra."""
+    import dataclasses
+
+    from agent import handoff as handoff_mod
+    from agent import runtime_config
+    from agent.config import settings as settings_reais
+    from agent.runtime_config import ConfigStore
+
+    # Config isolada: o notificador do Lab lê o store singleton (que aponta para o `config/` do
+    # repo, vivo enquanto o operador mexe no Studio). Aqui ele lê um store de `tmp_path`, e o
+    # consultor é forçado — assim o teste vale igual em qualquer máquina.
+    monkeypatch.setattr(
+        runtime_config, "settings", dataclasses.replace(settings_reais, consultor_number="5511977770000")
+    )
+    loja = ConfigStore(tmp_path / "config")
+    loja.ensure_files()
+    monkeypatch.setattr(handoff_mod, "config_store", loja)
+    # policy e presenter também leem o singleton: com o Studio do operador vivo, o `config/` do
+    # repo muda debaixo do teste (já vi este teste piscar por isso).
+    monkeypatch.setattr("agent.policy.store", loja)
+    monkeypatch.setattr("agent.presenter.store", loja)
+    client, manager = _app(
+        tmp_path,
+        monkeypatch,
+        [FakeRun(content=Extraction(intent=Intent.PEDIR_HUMANO))],
+        [FakeRun(content="ok")],
+    )
+    sid = _sid(client)
+    corpo = client.post(f"/api/lab/sessions/{sid}/messages", json={"text": "quero falar com uma pessoa"}).json()
+
+    assert corpo["state"]["stage"] == "handoff"
+    eventos = manager.sessao(sid).bus.historico()
+    avisos = {e["data"]["canal"]: e["data"] for e in eventos if e["event"] == "handoff_notice"}
+    assert set(avisos) == {"takeover", "whatsapp", "webhook"}
+    assert avisos["takeover"]["status"] == "simulado" and avisos["takeover"]["destino"] == sid
+    assert avisos["whatsapp"]["status"] == "simulado"
+    assert "Lead para assumir" in avisos["whatsapp"]["texto"]      # o que teria ido ao consultor
+    assert avisos["webhook"]["status"] == "desligado"      # sem `webhook_url`, nem chega a simular
+
+    # e o arquivo de takeover do repo continua intocado (o Lab nunca assume `lab-*`)
+    from agent.runtime_config import CONFIG_DIR
+    from agent.takeover import TakeoverStore
+
+    assert TakeoverStore(CONFIG_DIR).is_humano(sid) is False
+

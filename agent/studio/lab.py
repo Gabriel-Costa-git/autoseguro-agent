@@ -185,6 +185,18 @@ def resumir_state(state: LeadState | None) -> dict[str, Any]:
     return mask_obj(dados)
 
 
+def _notificador_simulado(logger_factory: Any) -> Any:
+    """Handoff no Lab: grava o que TERIA sido enviado, sem WhatsApp e sem takeover.
+
+    O operador precisa ver o aviso do consultor (texto e destino) no painel Eventos para poder
+    ajustar o slot — mas uma conversa de teste não pode disparar mensagem para ninguém nem marcar
+    `lab-*` como assumida em `config/atendimentos.json`.
+    """
+    from agent.handoff import HandoffNotifier
+
+    return HandoffNotifier(logger_factory=logger_factory, log_dir=_log_dir(), simulado=True)
+
+
 class LabManager:
     """Ciclo de vida das sessões do Lab. Uma mensagem por vez por sessão (lock)."""
 
@@ -199,10 +211,14 @@ class LabManager:
     async def create(self, api_url: str | None = None) -> Sessao:
         sid = f"lab-{uuid.uuid4().hex[:8]}"
         bus = EventBus(conversation_id=sid)
+        def logger_factory(_log_dir_ignorado: Any, cid: str) -> LoggerDoLab:
+            return LoggerDoLab(_log_dir(), cid, bus)
+
         conversation = await self._factory(
             base_url=api_url,
             trace=bus.publish_trace,
-            logger_factory=lambda _log_dir_ignorado, cid: LoggerDoLab(_log_dir(), cid, bus),
+            logger_factory=logger_factory,
+            on_handoff=_notificador_simulado(logger_factory),
         )
         api = api_url or getattr(getattr(conversation, "quote_client", None), "_base_url", "") or ""
         sessao = Sessao(id=sid, api=api, conversation=conversation, bus=bus)

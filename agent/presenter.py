@@ -22,6 +22,7 @@ from agent.models import (
     AskPlan,
     ConfirmCep,
     Handoff,
+    HandoffReason,
     LeadState,
     PlanoResumo,
     Present,
@@ -190,6 +191,81 @@ def _handoff(action: Handoff, state: LeadState) -> str:
     return texto
 
 
+# --------------------------------------------------------------------------- aviso ao consultor
+# Rótulo curto de cada motivo. Não é texto para o lead (esse é `presenter.handoff.<motivo>`, slot):
+# é o nome do motivo dentro do aviso interno, e o operador reescreve a frase inteira no slot
+# `presenter.handoff.aviso_consultor` se quiser.
+MOTIVOS_HANDOFF: dict[HandoffReason, str] = {
+    HandoffReason.LEAD_ACEITOU: "lead aceitou a cotação",
+    HandoffReason.LEAD_PEDIU_HUMANO: "lead pediu atendente",
+    HandoffReason.COTACAO_INDISPONIVEL: "cotação indisponível",
+    HandoffReason.ERRO_INTERNO: "erro interno",
+    HandoffReason.FORA_DE_ESCOPO: "fora de escopo",
+    HandoffReason.NEGOCIACAO: "negociação/desconto",
+    HandoffReason.SEM_PROGRESSO: "sem progresso",
+}
+
+
+def aviso_consultor(state: LeadState, action: Handoff, telefone: str, link: str) -> str:
+    """Mensagem que vai para o CONSULTOR (não para o lead) quando a conversa vira handoff.
+
+    Aqui o valor PODE aparecer: quem lê é quem vai fechar a venda, e o número continua vindo do
+    `Quote` da API, formatado pelo mesmo `_brl` da mensagem do lead — preço nasce num lugar só.
+    """
+    return _t(
+        "presenter.handoff.aviso_consultor",
+        motivo=MOTIVOS_HANDOFF.get(action.reason, action.reason.value.replace("_", " ")),
+        nome=state.lead_nome or "—",
+        telefone=telefone or "—",
+        origem=state.origem or "—",
+        dados=_dados_do_lead(state),
+        cotacoes=_cotacoes_do_lead(state),
+        link=link,
+    )
+
+
+def _dados_do_lead(state: LeadState) -> str:
+    """Uma linha com o que foi coletado: `idade: 35 · carros: Onix 2022 · cep: 01310-100`."""
+    partes = []
+    if state.idade is not None:
+        partes.append(f"idade: {state.idade}")
+    carros = "; ".join(v.rotulo() for v in state.veiculos) or state.veiculo_texto
+    if carros:
+        partes.append(f"carros: {carros}")
+    if state.cep:
+        partes.append(f"cep: {_cep_formatado(state.cep)}")
+    elif state.cep_ausente:
+        partes.append("cep: não informado")
+    if state.plano_id:
+        plano = f"plano: {state.plano_id}"
+        partes.append(f"{plano} (assumido)" if state.plano_assumido else plano)
+    return " · ".join(partes) or "—"
+
+
+def _cotacoes_do_lead(state: LeadState) -> str:
+    """Uma linha por carro, com o preço que a API devolveu (ou o que impediu de cotar)."""
+    if not state.veiculos and state.veiculo_texto is None and state.veiculo_ano is None:
+        # Handoff no começo da conversa (o lead pediu humano de cara): não há carro para listar.
+        return "nenhum carro informado ainda"
+    veiculos = state.veiculos or [
+        VeiculoColetado(texto=state.veiculo_texto, ano=state.veiculo_ano, quote_result=state.quote_result)
+    ]
+    linhas = []
+    for veiculo in veiculos:
+        resultado = veiculo.quote_result
+        rotulo = veiculo.rotulo()
+        if resultado is None:
+            linhas.append(f"{rotulo} — sem cotação")
+        elif resultado.outcome is QuoteOutcome.OK and resultado.quote is not None:
+            quote = resultado.quote
+            linhas.append(f"{rotulo} — {quote.plano_nome} {_brl(quote.premio_mensal)}/mês")
+        elif resultado.outcome is QuoteOutcome.RECUSA:
+            linhas.append(f"{rotulo} — recusado: {resultado.motivo_recusa or 'perfil fora dos critérios'}")
+        else:
+            linhas.append(f"{rotulo} — sem cotação ({resultado.outcome.value})")
+    return "\n".join(linhas)
+
+
 # --------------------------------------------------------------------------- formatação
 def _brl(valor: float) -> str:
     """Formato brasileiro: milhar com ponto, decimal com vírgula."""
@@ -229,4 +305,4 @@ def _minuscula_inicial(texto: str) -> str:
     return frase if frase.endswith((".", "!", "?")) else f"{frase}."
 
 
-__all__ = ["render"]
+__all__ = ["aviso_consultor", "render"]

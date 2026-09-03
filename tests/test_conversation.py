@@ -68,6 +68,7 @@ def montar(
     lento=False,
     cep_info=None,
     lookup=None,
+    on_handoff=None,
 ):
     logger = FakeLogger(tmp_path, "c-teste")
     policy = ScriptedPolicy(passos)
@@ -87,6 +88,7 @@ def montar(
         render=render_fake,
         lookup_cep=lookup,
         logger_factory=logger_factory_unico(logger),
+        on_handoff=on_handoff,
     )
     return conv, {
         "logger": logger,
@@ -752,4 +754,83 @@ async def test_aviso_de_cotacao_lenta_sai_uma_vez_so_com_dois_carros(tmp_path):
 
     lentos = [o for o in saidas if o.text == TEXTO_LENTO]
     assert len(lentos) == 1
+
+
+# --------------------------------------------------------------------------- aviso de handoff (F9)
+def _passo_handoff(payload=None):
+    def passo(s, e):
+        s.stage = Stage.HANDOFF
+        s.handoff_reason = HandoffReason.LEAD_PEDIU_HUMANO
+        return s, [Handoff(reason=HandoffReason.LEAD_PEDIU_HUMANO, payload=payload or {"dados": {}})]
+
+    return passo
+
+
+@pytest.mark.asyncio
+async def test_on_handoff_e_chamado_uma_vez_e_so_depois_do_lead_ser_avisado(tmp_path):
+    ordem: list[str] = []
+    avisos: list[tuple] = []
+
+    async def on_handoff(state, action):
+        ordem.append("aviso")
+        avisos.append((state.conversation_id, action.reason))
+
+    conv, _ = montar(
+        tmp_path, [_passo_handoff()], extracoes=[Extraction(intent=Intent.PEDIR_HUMANO)],
+        on_handoff=on_handoff,
+    )
+    saidas: list[Outbound] = []
+
+    async def emit(out):
+        ordem.append("outbound")
+        saidas.append(out)
+
+    await conv.handle(Inbound(conversation_id="c-teste", message_id="m1", text="quero um humano"), emit)
+
+    assert ordem == ["outbound", "aviso"]      # o lead vem primeiro; o consultor depois
+    assert avisos == [("c-teste", HandoffReason.LEAD_PEDIU_HUMANO)]
+    assert len(saidas) == 1
+
+
+@pytest.mark.asyncio
+async def test_sem_gancho_o_turno_e_o_de_sempre(tmp_path):
+    conv, deps = montar(tmp_path, [_passo_handoff()], extracoes=[Extraction(intent=Intent.PEDIR_HUMANO)])
+    state, saidas = await falar(conv, "quero um humano", 1)
+
+    assert state.stage is Stage.HANDOFF and len(saidas) == 1
+    kinds = [e["event"] for e in deps["logger"].eventos()]
+    assert "handoff" in kinds and "handoff_notice" not in kinds
+
+
+@pytest.mark.asyncio
+async def test_aviso_que_falha_nao_derruba_o_turno(tmp_path):
+    async def on_handoff(state, action):
+        raise RuntimeError("consultor inalcançável")
+
+    conv, deps = montar(
+        tmp_path, [_passo_handoff()], extracoes=[Extraction(intent=Intent.PEDIR_HUMANO)],
+        on_handoff=on_handoff,
+    )
+    state, saidas = await falar(conv, "quero um humano", 1)
+
+    assert state.stage is Stage.HANDOFF          # o turno terminou normalmente
+    assert len(saidas) == 1
+    evento = next(e for e in deps["logger"].eventos() if e["event"] == "handoff_notice")
+    assert evento["data"] == {"canal": "notifier", "status": "erro", "erro": "RuntimeError: consultor inalcançável"}
+
+
+@pytest.mark.asyncio
+async def test_erro_interno_tambem_avisa_o_consultor(tmp_path):
+    """Turno quebrado vira handoff: sem o aviso, ninguém do outro lado ficaria sabendo."""
+    avisos: list[tuple] = []
+
+    async def on_handoff(state, action):
+        avisos.append((action.reason, action.payload.get("motivo")))
+
+    conv, _ = montar(tmp_path, [], erro_extractor=RuntimeError("boom"), on_handoff=on_handoff)
+    state, saidas = await falar(conv, "oi", 1)
+
+    assert state.stage is Stage.HANDOFF
+    assert saidas[0].text == TEXTO_ERRO
+    assert avisos == [(HandoffReason.ERRO_INTERNO, "erro_interno")]
 

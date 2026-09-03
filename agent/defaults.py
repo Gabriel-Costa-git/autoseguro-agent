@@ -271,6 +271,17 @@ SLOTS: dict[str, dict] = {
         'label': 'Recusa: fechamento', 'grupo': 'presenter', 'placeholders': [],
         'default': 'Agradeço muito o contato e espero te atender numa outra oportunidade!',
     },
+    'presenter.handoff.aviso_consultor': {
+        'label': 'Handoff: aviso ao consultor (WhatsApp)', 'grupo': 'presenter',
+        'placeholders': ['motivo', 'nome', 'telefone', 'origem', 'dados', 'cotacoes', 'link'],
+        'default': '''🔔 Lead para assumir — {motivo}
+{nome} · {telefone} · {origem}
+{dados}
+
+{cotacoes}
+
+Abrir no Studio: {link}''',
+    },
     'presenter.cobertura.colisao': {
         'label': 'Cobertura legível: colisao', 'grupo': 'presenter', 'placeholders': [],
         'default': 'colisão',

@@ -254,3 +254,29 @@ def test_linhas_da_entrega_sao_parseadas(tmp_path):
     assert resumo["stage"] == "coleta_idade"
     assert resumo["ultima_msg"] == "Pra te cotar direitinho: quantos anos você tem?"
     assert resumo["status"] == "agente"
+
+
+def test_conversa_com_handoff_e_takeover_fica_humana_sem_perder_o_motivo(tmp_path):
+    """F9: o handoff assume a conversa sozinho — em Atendimentos ela some do balde do agente."""
+    _escrever(tmp_path, "wa-1", [
+        _linha("2026-09-03T10:00:00+00:00", "inbound", text="quero falar com uma pessoa",
+               media_type="text", origem="whatsapp:corretora"),
+        _linha("2026-09-03T10:00:01+00:00", "decision", stage="handoff", actions=["handoff"]),
+        _linha("2026-09-03T10:00:02+00:00", "handoff", reason="lead_pediu_humano", payload={}),
+        _linha("2026-09-03T10:00:03+00:00", "handoff_notice", canal="takeover", status="ok", destino="wa-1"),
+        _linha("2026-09-03T10:00:03+00:00", "handoff_notice", canal="whatsapp", status="ok",
+               destino="+55 ** *****-****"),
+    ])
+    takeover = TakeoverStore(tmp_path / "config")
+    takeover.assumir("wa-1")                       # é o que o notificador faz no turno
+    catalogo = _catalogo(tmp_path, takeover)
+
+    resumo = catalogo.resumo("wa-1")
+    assert resumo["status"] == "humano"            # takeover vence o "encerrado" do handoff
+    assert resumo["handoff_reason"] == "lead_pediu_humano"
+    assert [i["conversation_id"] for i in catalogo.listar(status="humano")] == ["wa-1"]
+
+    eventos = catalogo.transcricao("wa-1")["eventos"]
+    canais = [e["data"]["canal"] for e in eventos if e["event"] == "handoff_notice"]
+    assert canais == ["takeover", "whatsapp"]      # a transcrição mostra o que foi avisado
+

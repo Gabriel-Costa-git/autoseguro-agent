@@ -26,6 +26,7 @@ from agent.models import (
     Action,
     CepInfo,
     Extraction,
+    Handoff,
     HandoffReason,
     Inbound,
     Intent,
@@ -91,6 +92,7 @@ class Conversation:
         lookup_cep: Callable[..., Awaitable[Any]] | None = None,
         logger_factory: Callable[[Path, str], Any] | None = None,
         cep_timeout_s: float | None = None,
+        on_handoff: Callable[[LeadState, Any], Awaitable[None]] | None = None,
     ) -> None:
         self.rules = rules
         self.quote_client = quote_client
@@ -100,6 +102,7 @@ class Conversation:
         self.store = store
         self._today = today
         self._cep_timeout_s = cep_timeout_s  # None = usa o valor efetivo do store na chamada
+        self._on_handoff = on_handoff        # avisa o consultor; None = ninguém é avisado (CLI)
 
         if next_action is None:
             from agent.policy import next_action as next_action_real
@@ -251,6 +254,8 @@ class Conversation:
                     payload=action.payload,
                 )
             await self._enviar(self._render(action, state), "template", turno)
+            if action.kind == "handoff":
+                await self._avisar_handoff(state, action, turno)
             return state
 
         # `answer_with_tools` é uma `Reply` cuja diretiva manda usar as ferramentas do painel:
@@ -278,6 +283,26 @@ class Conversation:
             return await self._cotar(state, action, turno, rodada)
 
         raise ValueError(f"ação desconhecida: {action.kind}")
+
+    async def _avisar_handoff(self, state: LeadState, action: Any, turno: _Turno) -> None:
+        """Chama o gancho de handoff DEPOIS de o lead receber o texto, e só uma vez por handoff.
+
+        Depois porque o lead vem primeiro: se o aviso ao consultor travar, ele já foi respondido.
+        Dentro de try/except porque um WhatsApp fora do ar não pode virar erro de turno.
+        """
+        if self._on_handoff is None:
+            return
+        try:
+            await self._on_handoff(state, action)
+        except Exception as exc:  # noqa: BLE001 — aviso é observabilidade, não o turno
+            log.error("aviso de handoff falhou (%s): %s", type(exc).__name__, str(exc)[:200])
+            turno.logger.event(
+                "handoff_notice",
+                message_id=turno.inbound.message_id,
+                canal="notifier",
+                status="erro",
+                erro=f"{type(exc).__name__}: {exc}"[:200],
+            )
 
     def _logar_tool_calls(self, turno: _Turno) -> None:
         """Grava as tools que o Responder chamou durante a resposta (antes do `llm_call`: elas
@@ -362,12 +387,18 @@ class Conversation:
         state.handoff_reason = HandoffReason.ERRO_INTERNO
         try:
             await self._enviar(config_store.text("conversation.texto_erro"), "template", turno)
+            acao = Handoff(
+                reason=HandoffReason.ERRO_INTERNO,
+                payload={"conversation_id": state.conversation_id, "motivo": "erro_interno"},
+            )
             turno.logger.event(
                 "handoff",
                 message_id=turno.inbound.message_id,
-                reason=HandoffReason.ERRO_INTERNO.value,
-                payload={"conversation_id": state.conversation_id, "motivo": "erro_interno"},
+                reason=acao.reason.value,
+                payload=acao.payload,
             )
+            # Turno quebrado também é handoff: sem isto, ninguém do outro lado ficaria sabendo.
+            await self._avisar_handoff(state, acao, turno)
         except Exception as envio:  # noqa: BLE001 — canal caiu; o estado já registra o handoff
             log.error("falha ao avisar o lead do erro: %s", type(envio).__name__)
         return state

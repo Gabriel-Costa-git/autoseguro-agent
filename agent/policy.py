@@ -145,7 +145,6 @@ def next_action(
     """Decide o próximo passo. Não muta `state`: devolve uma cópia."""
     s = state.model_copy(deep=True)
     _migrar_veiculos(s)
-    perguntou_plano = state.ultima_pergunta == "plano"
 
     # Re-entradas do conversation (não são turno novo do lead).
     if extraction is None:
@@ -193,7 +192,7 @@ def next_action(
     # A marca é `plano_perguntado`, e não a última pergunta: uma pendência no meio (um CEP
     # inválido respondendo à pergunta do plano) trocaria `ultima_pergunta` e faria o agente
     # perguntar o plano de novo. Como a marca só é gravada ao PERGUNTAR, nunca se assume antes.
-    if s.plano_id is None and perguntou_plano and _campo_faltante(s) == "plano":
+    if s.plano_id is None and s.plano_perguntado and _campo_faltante(s) == "plano":
         progresso = _assumir_plano(s, rules) or progresso
 
     s, escalou = _atualizar_estagnacao(s, progresso)
