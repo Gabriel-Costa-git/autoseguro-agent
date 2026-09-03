@@ -211,7 +211,7 @@ em background com um lock por conversa e envia "digitando" antes de cada respost
 texto (áudio, imagem, documento) recebe pedido para escrever.
 
 ## Testes
-`uv run pytest -q` roda <!-- n_testes -->590 testes sem rede, sem LLM e sem docker: transporte HTTP mockado
+`uv run pytest -q` roda <!-- n_testes -->1019 testes sem rede, sem LLM e sem docker: transporte HTTP mockado
 para `/quote` e ViaCEP, relógio e sleep injetáveis para o retry, `FakeLLM` para o turno,
 policy e presenter puros. Há um teste que faz grep no `presenter.py` para garantir que nenhum
 valor de preço está fixo em template.

@@ -56,7 +56,7 @@ TEXTO_TERMINAL = "Um consultor já está com o seu caso e responde por aqui mesm
 def _upsert(message_id: str, message: dict[str, Any], push_name: str | None = None) -> dict[str, Any]:
     return {
         "event": "messages.upsert",
-        "instance": "referencia",
+        "instance": "corretora",
         "data": {
             "key": {"remoteJid": f"{NUMERO}@s.whatsapp.net", "fromMe": False, "id": message_id},
             "message": message,
@@ -104,7 +104,7 @@ def _sender_mudo() -> tuple[Any, list[dict[str, Any]]]:
         return httpx.Response(200, json={"status": "ok"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    return EvolutionSender("http://evolution.test", "chave", "referencia", client=client), chamadas
+    return EvolutionSender("http://evolution.test", "chave", "corretora", client=client), chamadas
 
 
 def _app(tmp_path, conversation, **config):

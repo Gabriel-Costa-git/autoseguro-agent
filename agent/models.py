@@ -392,7 +392,7 @@ EventKind = Literal[
     # F11 — o que o log escondia: retry/erro do LLM, guardrail que apagou preço, refresh
     # do /planos, saída que o canal NÃO entregou, takeover devolvido por inatividade e
     # campo que veio da regex de fallback em vez do modelo.
-    "llm_retry", "llm_error", "llm_guard", "planos_refresh",
+    "llm_retry", "llm_error", "llm_guard",
     "outbound_suprimido", "takeover_expirado", "extraction_regex",
 ]
 

@@ -71,7 +71,7 @@ def _montar(tmp_path, conversation, clock=None, **config):
         return httpx.Response(200, json={"status": "ok"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    sender = EvolutionSender("http://evolution.test", "chave", "referencia", client=client)
+    sender = EvolutionSender("http://evolution.test", "chave", "corretora", client=client)
     conversation.eventos = eventos
     app = build_app(
         conversation,
@@ -325,7 +325,7 @@ async def test_config_ilegivel_cai_nos_padroes_e_o_canal_segue(tmp_path):
         return httpx.Response(200, json={"status": "ok"})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    sender = EvolutionSender("http://evolution.test", "chave", "referencia", client=client)
+    sender = EvolutionSender("http://evolution.test", "chave", "corretora", client=client)
     app = build_app(conversation, sender, config=LojaQuebrada(),
                     logger_factory=lambda cid: FakeLogger(tmp_path, cid))
 
