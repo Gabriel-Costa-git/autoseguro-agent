@@ -52,7 +52,7 @@ def _com_consultor(loja) -> None:
 
 @pytest.fixture
 def loja(tmp_path, monkeypatch) -> ConfigStore:
-    """Store isolado e SEM `CONSULTOR_NUMBER` do ambiente (a máquina do orquestrador tem um)."""
+    """Store isolado e SEM `CONSULTOR_NUMBER` do ambiente (a máquina de desenvolvimento tem um)."""
     monkeypatch.setattr(runtime_config, "settings", dataclasses.replace(settings, consultor_number=None))
     store = ConfigStore(tmp_path / "config")
     store.ensure_files()
@@ -435,11 +435,11 @@ async def test_modo_simulado_nao_envia_nem_assume_e_mostra_o_texto(loja, logger,
 @pytest.mark.asyncio
 async def test_studio_url_configuravel_muda_o_link(loja, logger):
     loja.set_overrides("tools", {"handoff": {
-        "consultor_number": "5511977770000", "studio_url": "https://studio.referencia.test/",
+        "consultor_number": "5511977770000", "studio_url": "https://studio.corretora.test/",
     }})
     sender = FakeSender()
     await _notificador(loja, logger, sender=sender)(_state(), _acao())
-    assert f"https://studio.referencia.test/#atendimentos/{CID}" in sender.enviadas[0][1]
+    assert f"https://studio.corretora.test/#atendimentos/{CID}" in sender.enviadas[0][1]
 
 
 @pytest.mark.asyncio

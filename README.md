@@ -9,9 +9,15 @@ cotação um consultor humano recebe os dados e a cotação prontos para emitir.
 
 ## Como rodar
 
+Pré-requisitos: **[uv](https://docs.astral.sh/uv/)**, **Python ≥ 3.12** (o `uv sync` instala o
+interpretador se faltar) e, opcionalmente, **Docker** — só para subir a API de cotação do
+desafio do jeito mais curto. Sem Docker, ela roda direto com `uv`.
+
 ```bash
-# 1. API de cotação do desafio (repo clonado ao lado)
-cd ../namastex-fde-challenge && docker compose up --build -d   # http://localhost:8000
+# 1. API de cotação do desafio (repo do desafio clonado ao lado)
+cd ../namastex-fde-challenge && docker compose up --build -d          # http://localhost:8000
+# ...ou, sem Docker:
+cd ../namastex-fde-challenge/quote-service && uv run uvicorn app.main:app --port 8000
 
 # 2. Dependências e configuração
 cd ../autoseguro-agent
@@ -22,14 +28,28 @@ cp .env.example .env            # preencha GOOGLE_API_KEY (Gemini)
 uv run python -m agent.chat
 uv run python -m agent.chat --script scripts/roteiro-feliz.txt --delay 15   # roteiro sem interação
 
-# 4. Testes (sem rede, sem LLM, sem docker)
+# 4. Testes (sem rede, sem LLM, sem docker) e lint
 uv run pytest -q
+uv run ruff check agent tests scripts
 
 # 5. Canal WhatsApp (Evolution API v2) — opcional, exige instância pareada
 uv run python -m agent.serve    # webhook em POST /webhook, porta $PORT (3000)
+
+# 6. Studio, o painel local de edição e teste (opcional)
+uv run python -m agent.studio   # http://127.0.0.1:$STUDIO_PORT (8765)
 ```
 
 Comandos do chat: `/estado` (estado mascarado), `/audio` (simula mensagem de mídia), `/sair`.
+
+Variáveis que valem a pena conhecer (todas com padrão; o `.env.example` traz o resto):
+
+| Variável | Padrão | Para quê |
+|---|---|---|
+| `GOOGLE_API_KEY` | — | chave do Gemini; sem ela o CLI sai com mensagem clara |
+| `QUOTE_API_URL` | `http://localhost:8000` | onde está a API de cotação do desafio |
+| `LOG_DIR` | `logs` | onde o JSONL de cada conversa é gravado |
+| `PORT` | `3000` | porta do webhook da Evolution (`agent.serve`) |
+| `STUDIO_PORT` | `8765` | porta do Studio; troque se a 8765 estiver ocupada |
 
 ## Arquitetura em uma frase
 
@@ -102,11 +122,14 @@ as falhas são independentes entre chamadas e `POST /quote` é pura e idempotent
 | 422 `detail` (Pydantic) ou 400 `payload_invalido` | `BUG` (erro nosso) | sem retry; handoff `ERRO_INTERNO` |
 | esgotou tentativas/orçamento | `INDISPONIVEL` | handoff `COTACAO_INDISPONIVEL` com os dados coletados |
 
-Política: **timeout 3,5 s por tentativa, até 4 tentativas, backoff exponencial com jitter
-±50 %, orçamento total de 15 s.** Esperar os 8 s garantiria a resposta da chamada lenta, mas
-cortar em 3,5 s e tentar de novo custa menos em média (70 % de chance de resposta em 50 ms).
-O preço disso é contar o timeout como falha: com 3 tentativas, 0,3³ = 2,7 % das cotações
-escalariam por infra; com 4, 0,3⁴ ≈ 0,8 %. No primeiro timeout o lead recebe "só um instante".
+Política: **timeout 3,5 s por tentativa, até 4 tentativas em 5xx, backoff exponencial com
+jitter ±50 %, orçamento total de 15 s.** As duas travas competem: um 5xx volta na hora, então
+cabem as 4 tentativas; um timeout gasta 3,5 s cada, e aí o orçamento de 15 s corta na 3ª — é
+o que se vê quando a API está 100 % lenta. Esperar os 8 s garantiria a resposta da chamada
+lenta, mas cortar em 3,5 s e tentar de novo custa menos em média (70 % de chance de resposta
+em 50 ms). O preço disso é contar o timeout como falha: com 3 tentativas, 0,3³ = 2,7 % das
+cotações escalariam por infra; com 4, 0,3⁴ ≈ 0,8 %. No primeiro timeout o lead recebe "só um
+instante".
 `/health` é sempre OK e não reflete a instabilidade, então não serve como sinal.
 
 ### 3. Pré-validação local é atalho, não contrato
@@ -144,7 +167,8 @@ A API não devolve nenhum id, então o agente gera os seus. Cada conversa vira u
 `logs/<conversation_id>.jsonl` com eventos `inbound`, `extraction`, `decision`,
 `quote_attempt` (um por tentativa, com `quote_id`, status HTTP, latência e classificação),
 `quote_result`, `cep_lookup`, `llm_call`, `outbound`, `handoff`, `refusal`, `error`. Toda
-mensagem tem `message_id`; toda saída aponta `in_reply_to`.
+mensagem tem `message_id`, e o `Outbound` carrega `in_reply_to` para ligar cada resposta à
+mensagem que a provocou.
 
 ### 6. Dados sensíveis
 - O agente **não pede CPF, e-mail, telefone nem placa**: a API não usa nada disso. O dataset
@@ -170,8 +194,9 @@ em `config/settings.json`; `GEMINI_MODEL` no `.env` continua valendo como fallba
 decide está fora do framework, em Python puro, para ser testável e trocável.
 
 O provedor de LLM é **outra dependência instável**, e foi tratado como a `/quote`: a primeira
-rodada real estourou a cota gratuita do Gemini (5 req/min e 20 req/dia no `gemini-2.5-flash`),
-o agno não re-tenta por conta própria e devolve o erro dentro do `RunOutput` em vez de levantar.
+rodada real estourou a cota gratuita do Gemini (429 `RESOURCE_EXHAUSTED`; os limites do plano
+gratuito são por projeto e visíveis no AI Studio, não vale fixar número aqui), o agno não
+re-tenta por conta própria e devolve o erro dentro do `RunOutput` em vez de levantar.
 Por isso `brain.py` tem retry que honra o `retryDelay` do provedor (backoff 2/4/8 s quando ele
 não diz, até 3 novas tentativas, 30 s de orçamento) e degradação honesta: extração indisponível
 vira "não consegui ler sua mensagem, pode repetir?" em vez de repetir a última pergunta, e três
@@ -180,12 +205,13 @@ seguidas escalam para humano. O CLI tem `--delay` para roteiros dentro da cota g
 ### 9. Canal é adaptador
 O núcleo expõe `Conversation.handle(inbound, emit)`. O CLI é o canal de desenvolvimento e
 gera o log da entrega. O adaptador Evolution (`channels/evolution.py`) traduz o webhook
-`messages.upsert`, ignora grupos e mensagens próprias, responde 200 imediatamente, processa
+`messages.upsert`, ignora grupos, mensagens próprias e eventos sem texto (recibos de
+protocolo — ver "Falhas tratadas"), responde 200 imediatamente, processa
 em background com um lock por conversa e envia "digitando" antes de cada resposta. Mídia sem
 texto (áudio, imagem, documento) recebe pedido para escrever.
 
 ## Testes
-`uv run pytest -q` roda 172 testes sem rede, sem LLM e sem docker: transporte HTTP mockado
+`uv run pytest -q` roda <!-- n_testes -->590 testes sem rede, sem LLM e sem docker: transporte HTTP mockado
 para `/quote` e ViaCEP, relógio e sleep injetáveis para o retry, `FakeLLM` para o turno,
 policy e presenter puros. Há um teste que faz grep no `presenter.py` para garantir que nenhum
 valor de preço está fixo em template.
@@ -226,153 +252,53 @@ roteiro reenvia a linha quando o agente pede.
 varre os três logs por CPF, e-mail, telefone, placa e CEP completo e falha se achar qualquer um
 em claro. Resultado na entrega: `3 arquivo(s) verificado(s), 0 ocorrência(s) de PII em claro`.
 
-## Transparência de uso de IA
-Construído com Claude Code orquestrando executores paralelos (Orq). Em `ai-logs/`:
-`briefs/` (as instruções dadas a cada executor), `reports/` (o que cada um entregou e decidiu)
-e `sessions/` (transcripts `.jsonl` exportados e higienizados por `scripts/export_ai_logs.py`).
+## Falhas tratadas
 
-## Studio (edição e teste local do agente)
+O que quebrou em uso real virou regra no código.
 
-```bash
-uv run python -m agent.studio          # http://127.0.0.1:8765
-scripts/quote_api_falha.sh             # opcional: API de cotação com falha forçada na 8001
-```
+### Falhas tratadas no canal
+A Evolution manda `messages.upsert` para coisas que não são mensagem (recibos, chaves de
+sessão, reações, edições): o webhook descarta todo upsert sem conteúdo, e só áudio, imagem,
+documento, sticker e texto viram turno. Cada conversa tem teto de respostas por minuto
+(`tools.canal.max_respostas_por_minuto`, 6) e nunca recebe o mesmo texto duas vezes seguidas
+sem ter escrito algo no meio; o que é barrado vira um evento `outbound_suprimido` com o
+motivo, porque silêncio sem rastro é pior que ruído. Mensagens picadas do mesmo lead dentro
+de `tools.canal.debounce_s` (2 s) viram um turno só, em vez de uma resposta para cada linha.
+O aviso ao consultor agora sabe se chegou — a Evolution devolve sucesso/falha e o webhook do
+CRM tem três tentativas — e a conversa **só** é passada para o humano depois de pelo menos um
+aviso entregue: se todos falharem, o agente continua respondendo e o log diz por quê.
+Takeover automático que ninguém foi atender volta ao agente depois de
+`tools.handoff.auto_devolver_apos_min` (4 h), com um evento `takeover_expirado`.
 
-Painel de operador, só em `127.0.0.1`, fora do canal Evolution (`agent/serve.py` não sabe que
-ele existe). Tema dark, sem framework, sem bundler e sem nada vindo de CDN: HTML, CSS e dois
-módulos ES servidos do disco. Uma barra superior de 56 px carrega a marca, o breadcrumb
-(`Atendimentos / <conversa>`, `Lab / Prompts / <slot>`) e as três abas de topo como links
-segmentados, com o indicador de saúde à direita; o hash da URL (`#atendimentos`,
-`#lab/conversa`, `#lab/prompts`, `#lab/tools`, `#config`) é quem manda, e a tela inicial é
-`#atendimentos`. Prompts e Tools são ferramentas do Lab — o workbench do agente —, então são
-sub-abas dele, não abas de topo. Lab e "Testar prompt" dividem o mesmo componente de chat e a
-MESMA sessão do Lab — uma por aba do navegador, que sobrevive ao reload em vez de abrir outra.
+Os três parâmetros são editáveis na aba Config do Studio (origem do valor à vista):
 
-- **Atendimentos** — a visão de operação: todas as conversas reais do agente numa lista só,
-  ordenadas pela última mensagem. Cada linha traz a **origem** do lead (`whatsapp:<instância>`,
-  `cli` ou `lab`), o status (`agente`, `humano`, `encerrado`), a etapa, a última mensagem e o
-  tempo relativo; filtros por origem, status e busca. Abrir uma conversa mostra a transcrição,
-  os eventos e o estado reconstruído do log. **Assumir** passa a conversa para o operador: o
-  agente para de responder aquele lead na hora (o webhook só registra o `inbound` com
-  `modo="humano"`) e o composer libera o envio pela Evolution, que entra no log como `outbound`
-  com `source="humano"`. **Devolver ao agente** desfaz. Só conversas de WhatsApp (`wa-*`) podem
-  receber mensagem do operador — Lab e CLI não têm para onde enviar.
-- **Lab · Conversa** — conversa como lead usando o mesmo `Conversation.handle` da entrega (nunca uma
-  cópia). O chat ocupa o centro (bolhas do lead à direita, do agente à esquerda com a etiqueta
-  `template`/`llm`) e o painel de 380 px à direita tem três painéis: **Eventos** ao vivo do
-  turno (extração, decisão da policy, cada tentativa da `/quote` com status e latência, ViaCEP,
-  handoff), **Contexto** — o payload exato de cada chamada ao modelo, com as instruções
-  renderizadas, o histórico enviado, a entrada e a saída — e **Estado**, o `LeadState` da
-  sessão. Clicar numa bolha seleciona o turno. Na barra do chat ficam o seletor de API de
-  cotação (docker na 8000, falha forçada na 8001), que mostra a URL em uso pela sessão, e o
-  seletor de modelo, com a mesma lista da aba Config.
-- **Lab · Prompts** — uma página de editor: dropdown de slot com busca (`/` foca) e itens agrupados,
-  dropdown de versão, selo `Ativa`/`Rascunho`/`Default · imutável`, e os botões **Ativar** e
-  **Salvar** (`Cmd/Ctrl+S`). O corpo alterna entre editor mono, preview de markdown e os dois
-  lado a lado; os chips dos placeholders do slot inserem `{campo}` no cursor, e *Diff vs
-  default* abre em painel lateral. Cada texto do agente é um *slot* com versões nomeadas e uma
-  ativa: prompts do Extractor e do Responder, exemplos de intent, diretivas por campo,
-  fallbacks anti-preço, textos da policy, templates do presenter (cotação, planos, recusa,
-  handoff por motivo) e textos da orquestração. Salvar aplica na hora, sem reiniciar. No rodapé,
-  **Testar prompt** abre o chat do Lab embutido para conversar sem trocar de aba.
-- **Lab · Tools** — as **integrações** do agente, em lista + detalhe. As embutidas (selo
-  `builtin`): `quote_client` (endpoints, timeout, tentativas, orçamento, backoff) e ViaCEP
-  (liga/desliga, URL, timeout), cada campo com a origem do valor efetivo num selo (`default`,
-  `env:VAR`, `override`) e o botão de voltar ao padrão. Cada uma traz também **Instruções e
-  textos**: os slots de Prompts que falam por ela (o texto de instabilidade da cotação, a
-  confirmação de CEP, a diretiva de pedir o CEP…), com a versão ativa, prévia e link para editar.
-  Abaixo delas ficam as **tools criadas no painel** — ver a seção logo adiante.
-- **Config** — mesma ficha para os `settings`: modelo do Gemini, janela de contexto do
-  Responder (quantas mensagens do histórico vão em cada chamada; o Extractor é sem histórico
-  por desenho), temperaturas, retry do LLM, delay do roteiro e caminho do banco de sessão. O
-  modelo é um **seletor** com botão **Atualizar modelos**, que consulta a API do Google
-  (`models.list`, só os que fazem `generateContent`) e guarda a lista em `config/models.json`;
-  a mesma lista aparece na barra do chat do Lab. Escolher grava override em
-  `config/settings.json` e vale no próximo turno, sem reiniciar. Aqui embaixo ficam também as
-  fichas de **policy** (limites de estagnação, tentativas de CEP, objeções até handoff) e de
-  **regras** (pré-validação local liga/desliga): elas ajustam a decisão do agente, não uma
-  integração, então saíram de Tools — os caminhos da API (`tools.policy.*`, `tools.rules.*`)
-  continuam os mesmos.
+- `tools.canal.max_respostas_por_minuto` (padrão 6) — teto de respostas por conversa por minuto; o que passa disso não é enviado e vira `outbound_suprimido`.
+- `tools.canal.debounce_s` (padrão 2) — segundos em que mensagens picadas do mesmo lead se juntam num turno só; `0` desliga.
+- `tools.handoff.auto_devolver_apos_min` (padrão 240) — minutos sem mensagem humana até um takeover automático voltar ao agente, com evento `takeover_expirado`.
 
-### Tools criadas no painel
-
-Em **Lab · Tools**, *Nova tool* cria uma integração que o agente passa a ter à mão: ela vira uma
-função que o **Responder** pode chamar no meio da conversa (function calling do Gemini), com o
-nome, a descrição e os parâmetros que você escreveu. A descrição é o que o modelo lê para decidir
-*quando* chamar; o campo **Instruções** vai para o system prompt (ex.: "nunca leia o número da
-apólice inteiro; confirme só os 4 últimos dígitos").
-
-Dois tipos:
-
-- **`http`** — um request: método, URL, headers, query e body. `{parametro}` é substituído pelo
-  argumento que o modelo mandou (escapado na URL), e a resposta volta como JSON compacto ou texto.
-- **`sql`** — uma query **somente leitura** num sqlite (caminho do arquivo) ou num Postgres
-  (`postgresql://…`, só se `psycopg` estiver instalado — não é dependência do projeto). O
-  parâmetro é nomeado (`:cpf`), nunca interpolado na string.
-
-O que o painel garante, e por quê:
-
-- **Segredo nunca entra em `config/`.** Onde vai a chave, escreve-se `${env:APOLICE_KEY}`; o valor
-  fica no `.env` e é resolvido só na hora da chamada. A API do Studio devolve a referência literal,
-  e qualquer valor resolvido é apagado (`***`) do resultado e do log. O seletor `${env:X}` do
-  formulário lista só os **nomes** das variáveis do ambiente.
-- **SQL é só leitura, duas vezes.** O registro recusa query que não comece com `SELECT`/`WITH`, que
-  tenha `;` ou palavra de escrita (`update`, `delete`, `drop`, `pragma`, `into`…); e o sqlite ainda
-  é aberto em `mode=ro`, para o caso de alguém editar o JSON à mão.
-- **A tool nunca derruba o turno.** Timeout (`asyncio.wait_for`), rede fora, variável de ambiente
-  ausente ou SQL inválido viram a string `erro: …` devolvida ao modelo, que segue a conversa. O
-  resultado é truncado em *máx. caracteres* antes de voltar para o prompt.
-- **Cada execução vira um evento `tool_call`** no JSONL da conversa — `{tool, args, status:
-  ok|erro|timeout, latency_ms, resultado}`, com a PII mascarada como no resto do log. Ele aparece
-  no painel Eventos do Lab e na transcrição de Atendimentos (`tool_call consulta_apolice: ok ·
-  210 ms`, clicável para abrir args e resultado).
-- **Botão Testar**: roda a tool salva com os argumentos que você digitar, sem LLM e sem gravar
-  conversa nenhuma — devolve resultado e latência.
-
-Exemplo do que fica em `config/custom_tools.json` (o `${env:…}` é literal no arquivo):
-
-```json
-{"tools": {"consulta_apolice": {
-  "nome": "consulta_apolice", "tipo": "http", "enabled": true,
-  "descricao": "Consulta a apólice do cliente pelo CPF. Use quando o lead perguntar sobre uma apólice existente.",
-  "instrucoes": "Nunca leia o número da apólice em voz alta; confirme só os 4 últimos dígitos.",
-  "parametros": {"cpf": {"tipo": "string", "descricao": "CPF só dígitos", "obrigatorio": true}},
-  "timeout_s": 5, "max_chars": 2000,
-  "http": {"metodo": "GET", "url": "https://api.exemplo.com/apolices/{cpf}",
-           "headers": {"Authorization": "Bearer ${env:APOLICE_KEY}"}, "resposta": "json"}
-}}}
-```
-
-Como isso não altera o comportamento entregue:
-
-- Tudo vive em `config/`. `prompts.json` guarda as versões; a versão `default` de cada slot
-  é imutável e igual ao texto em `agent/defaults.py`. `tools.json` e `settings.json` guardam
-  **só overrides**: valor efetivo = override > `.env` > default do código, e a UI mostra a
-  origem de cada valor. Sem override, o agente é exatamente o da entrega.
-- `tests/test_golden_textos.py` compara 26 saídas reais (todas as mensagens do presenter, os
-  prompts renderizados) com snapshots gerados do código entregue antes do refactor.
-- **Sem tool cadastrada, o Responder é o da entrega**: o `Agent` do agno é construído sem o
-  argumento `tools` (há teste que compara os kwargs da construção), e nenhum evento `tool_call`
-  existe. O Extractor e a policy nunca recebem tools — quem decide continua sendo código.
-- Atendimentos é **só leitura de log** — a fonte é `logs/*.jsonl` e `logs/studio/*.jsonl`, e
-  `logs/entrega/` fica de fora. Quem responde cada conversa está em `config/atendimentos.json`:
-  arquivo ausente ou vazio = o agente responde tudo, exatamente como na entrega.
-- Hot-reload por `mtime`: nada é lido no import, todo consumidor lê o store na chamada. Vale
-  também para o takeover, que é escrito pelo Studio e lido pelo `serve.py` — outro processo.
-- `guard_price` não tem toggle. A formatação de preço e as listas continuam em código; os
-  templates só recebem valores já formatados vindos da API.
+**Loop de respostas no smoke do WhatsApp.** No primeiro teste com um número real o agente
+respondeu à saudação e, em seguida, recebeu 23 `messages.upsert` sem texto e sem remetente —
+recibos de protocolo do WhatsApp, um a cada ~3 s, disparados pelos próprios envios do agente.
+O parser tratou cada um como turno do lead: o primeiro virou "manda por escrito", o segundo
+virou handoff por falta de progresso e, com a conversa já em estado terminal, todos os
+seguintes receberam o mesmo texto de encerramento — 23 mensagens idênticas em 80 s para uma
+pessoa real. Três mudanças: (1) o adaptador **ignora upsert sem conteúdo de texto** — recibo,
+reação e `protocolMessage` não são turno; (2) há um **limite de respostas por conversa por
+minuto**, para que uma cascata de eventos não vire uma cascata de mensagens; (3) **estado
+terminal responde uma vez e depois silencia**, porque depois do handoff quem fala é o humano.
+O payload real do incidente virou teste de regressão.
 
 ## Handoff (quando entra um humano)
 
 Quando a policy decide escalar (lead aceitou, pediu atendente, negociação, cotação indisponível,
-erro interno, fora de escopo, sem progresso), o lead recebe o texto de sempre — e, a partir da F9,
+erro interno, fora de escopo, sem progresso), o lead recebe o texto de sempre — e
 **o outro lado também fica sabendo**. `agent/handoff.py` dispara três canais independentes, cada um
 desligável e cada um virando um evento `handoff_notice` (`{canal, status, destino}`) no JSONL da
 conversa:
 
 | Canal | O que faz | Configuração |
 |---|---|---|
-| `takeover` | marca a conversa como **humana** (`config/atendimentos.json`): o webhook passa a registrar o `inbound` com `modo="humano"` e o agente para de responder aquele lead | `tools.handoff.auto_assumir` (padrão ligado) |
+| `takeover` | marca a conversa como **humana** (`config/atendimentos.json`): o webhook passa a registrar o `inbound` com `modo="humano"` e o agente para de responder aquele lead. Só acontece depois de pelo menos um aviso entregue; sem nenhum, sai `status: "nao_assumido"` e o agente continua respondendo | `tools.handoff.auto_assumir` (padrão ligado), `tools.handoff.auto_devolver_apos_min` (padrão 240) |
 | `whatsapp` | manda ao consultor um resumo com motivo, nome, telefone, origem, dados coletados, **o preço de cada carro** e o link direto de Atendimentos | `tools.handoff.consultor_number` (vem de `CONSULTOR_NUMBER`) e `tools.handoff.studio_url` |
 | `webhook` | `POST` JSON para um CRM (`{conversation_id, origem, motivo, dados, cotacoes, link, ts}`), 5 s de timeout | `tools.handoff.webhook_url` e `tools.handoff.webhook_headers` (valores aceitam `${env:X}`) |
 
@@ -388,6 +314,35 @@ Detalhes que importam:
   mostra o texto que teria ido ao consultor, sem WhatsApp e sem marcar `lab-*` como assumida.
 - O telefone do consultor vai **mascarado** para o log; a URL do webhook aparece só como host.
 
+## Studio (edição e teste local do agente)
+
+`uv run python -m agent.studio` sobe um painel de operador em `127.0.0.1`, fora do caminho da
+entrega: `serve.py` nunca importa `agent.studio` e, com `config/` vazia, o agente é o do commit.
+
+- **Atendimentos** — todas as conversas reais numa lista só, para ver o que o agente fez e
+  **assumir** a conversa quando o handoff pede um humano.
+- **Lab · Conversa** — conversar como lead pelo mesmo `Conversation.handle` da entrega (nunca
+  uma cópia), com eventos, payload de cada chamada ao modelo e estado ao lado.
+- **Lab · Prompts** — cada texto do agente é um slot versionado: editar e ativar sem
+  reiniciar, comparando com o default imutável.
+- **Lab · Tools** e **Config** — integrações e parâmetros com a origem de cada valor à vista
+  (`default`, `env:VAR`, `override`) e botão de voltar ao padrão.
+
+Detalhe de cada tela e o contrato de `config/`: **[`docs/STUDIO.md`](docs/STUDIO.md)**.
+
+## Limites de escopo
+
+- **WhatsApp real é opcional.** A entrega roda inteira pelo CLI; o adaptador Evolution existe
+  e foi testado num número real, mas depende de uma instância pareada que o avaliador não
+  precisa ter.
+- **Vigência assumida.** <!-- data_inicio --> Se o lead não informa a data de início, a
+  cotação usa a data de hoje.
+- **Cota do Gemini.** O plano gratuito tem limite por projeto; ele foi atingido em
+  desenvolvimento e o `--delay` do CLI existe por isso. Os números do limite mudam e não estão
+  fixados aqui de propósito.
+- **Sem API de contratação**, então o agente não fecha venda: o handoff entrega dados e
+  cotação prontos para um humano emitir.
+
 ## Limitações conhecidas
 - Estado da conversa em memória (`InMemoryStateStore`); um canal em produção trocaria por
   Redis/DB.
@@ -401,5 +356,14 @@ Detalhes que importam:
 - O Studio **envia** pela Evolution quando o operador assume, mas não recebe webhook: as
   respostas do lead continuam chegando pelo `serve.py`, que as registra sem chamar o agente.
 - Depois de um handoff, **"Devolver ao agente" faz o agente voltar a responder** — e, como a etapa
-  está terminal, ele responde com o texto de encerramento ("um consultor já está com o seu caso").
-  Para retomar a coleta é preciso uma conversa nova.
+  está terminal, ele manda uma vez o texto de encerramento ("um consultor já está com o seu
+  caso") e depois silencia. Para retomar a coleta é preciso uma conversa nova.
+
+## Transparência de uso de IA
+
+Construído com **orquestração multi-agente com Claude Code**: um terminal orquestrador e
+executores paralelos, cada um com escopo de arquivos fechado. Em `ai-logs/`: `briefs/` (as
+instruções dadas a cada executor), `reports/` (o que cada um entregou e decidiu) e
+`sessions/` (os transcripts `.jsonl`, exportados e higienizados por
+`scripts/export_ai_logs.py`). `ai-logs/README.md` explica o que foi redigido, por quê, e como
+validar (`--check`).

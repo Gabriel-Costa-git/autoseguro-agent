@@ -1,7 +1,9 @@
 """Gate da entrega: falha (exit 1) se algum log JSONL tiver PII em claro.
 
 Procura CPF, e-mail, telefone BR, placa e CEP completo (8 dígitos) — os mesmos
-padrões que `agent/pii.py` mascara. Uso: `uv run python scripts/check_logs_pii.py logs/entrega/*.jsonl`
+padrões que `agent/pii.py` mascara. O NOME do arquivo também é verificado: um log
+`wa-<telefone>.jsonl` vaza o número pelo nome mesmo com o conteúdo mascarado.
+Uso: `uv run python scripts/check_logs_pii.py logs/entrega/*.jsonl`
 """
 from __future__ import annotations
 
@@ -22,6 +24,10 @@ def main(paths: list[str]) -> int:
     achados = 0
     arquivos = [p for a in paths for p in (Path().glob(a) if any(c in a for c in "*?[") else [Path(a)])]
     for arq in arquivos:
+        no_nome = PADROES["telefone"].search(arq.name)
+        if no_nome:
+            achados += 1
+            print(f"{arq}: telefone em claro no NOME do arquivo: {no_nome.group(0)}")
         for n, linha in enumerate(arq.read_text(encoding="utf-8").splitlines(), 1):
             for nome, rx in PADROES.items():
                 for m in rx.finditer(linha):
