@@ -172,6 +172,7 @@ def resumir_state(state: LeadState | None) -> dict[str, Any]:
         "cep_confirmado": state.cep_confirmado,
         "cep_ausente": state.cep_ausente,
         "plano_id": state.plano_id,
+        "plano_perguntado": state.plano_perguntado,
         "plano_assumido": state.plano_assumido,
         "data_inicio": state.data_inicio.isoformat() if state.data_inicio else None,
         "ultima_pergunta": state.ultima_pergunta,

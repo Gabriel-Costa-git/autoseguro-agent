@@ -364,6 +364,7 @@ def test_resumir_state_mascara_pii_e_nao_inventa_preco():
     resumo = resumir_state(estado)
 
     assert resumo["origem"] is None
+    assert resumo["plano_perguntado"] is False and resumo["plano_assumido"] is False
     assert resumo["cep"] == "01310-***"
     assert resumo["cep_cidade"] == "São Paulo"
     assert resumo["cotacao"] is None

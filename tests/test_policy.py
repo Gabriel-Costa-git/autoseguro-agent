@@ -754,8 +754,10 @@ def test_diretiva_de_consulta_vem_do_slot(store_tmp):
 
 # --------------------------------------------------------------------------- plano assumido (F8)
 def _esperando_plano(**kw) -> LeadState:
-    """Estado logo depois do `AskPlan`: idade coletada, plano pendente."""
-    return _state(idade=35, stage=Stage.ESCOLHA_PLANO, ultima_pergunta="plano", **kw)
+    """Estado logo depois do `AskPlan`: idade coletada, pergunta feita, plano pendente."""
+    return _state(
+        idade=35, stage=Stage.ESCOLHA_PLANO, ultima_pergunta="plano", plano_perguntado=True, **kw
+    )
 
 
 def test_plano_assumido_quando_o_lead_nao_sabe():
@@ -803,6 +805,38 @@ def test_pergunta_do_plano_nao_e_assumida_antes_de_ser_feita():
     s, acoes = _act(_state(stage=Stage.COLETA_IDADE), _extr(idade=35))
     assert isinstance(acoes[0], AskPlan)
     assert s.plano_id is None and s.plano_assumido is False
+    assert s.plano_perguntado is True          # marcado AO perguntar, não antes
+
+
+def test_plano_nao_e_perguntado_duas_vezes_depois_de_um_cep_invalido():
+    """O caso que faltava: a resposta à pergunta do plano é um CEP quebrado.
+
+    A pendência troca `ultima_pergunta` para `cep`; a marca `plano_perguntado` não se perde, então
+    o plano é assumido na hora e o `AskPlan` nunca volta.
+    """
+    s, acoes = _act(_state(stage=Stage.COLETA_IDADE), _extr(idade=35))
+    assert isinstance(acoes[0], AskPlan) and s.plano_perguntado is True
+
+    s, acoes = _act(s, _extr(cep="123"))                  # CEP inválido no lugar da escolha
+    assert acoes == [AskField(campo="cep", motivo="formato inválido")]
+    assert s.ultima_pergunta == "cep"                     # a pendência sobrescreveu a última pergunta
+    assert s.plano_id == "essencial" and s.plano_assumido is True
+
+    s, acoes = _act(s, _extr(cep="01001-000"))            # agora o CEP certo
+    assert not any(isinstance(a, AskPlan) for a in acoes)  # o plano NÃO é perguntado de novo
+    assert s.plano_id == "essencial"
+
+
+def test_plano_perguntado_pelo_responder_numa_consulta_tambem_conta():
+    """Na consulta com ferramenta a pergunta do plano vai na diretiva — e também não se repete."""
+    s, acoes = _act(_state(idade=35), _extr(intent=Intent.CONSULTA))
+    assert isinstance(acoes[0], AnswerWithTools)
+    assert "pergunte qual plano ele quer cotar" in acoes[0].directive
+    assert s.plano_perguntado is True
+
+    s, acoes = _act(s, _extr(intent=Intent.OUTRO))
+    assert not any(isinstance(a, AskPlan) for a in acoes)
+    assert s.plano_id == "essencial" and s.plano_assumido is True
 
 
 # --------------------------------------------------------------------------- vários carros (F8)

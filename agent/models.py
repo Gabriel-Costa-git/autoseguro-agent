@@ -238,6 +238,7 @@ class LeadState(BaseModel):
     cep_tentativas: int = 0
     cep_ausente: bool = False             # lead não sabe → cota sem CEP, avisar "pode subir"
     plano_id: PlanoId | None = None
+    plano_perguntado: bool = False        # a pergunta do plano já foi feita (não se repete)
     plano_assumido: bool = False          # o lead não escolheu; a policy assumiu o padrão
     data_inicio: date | None = None       # None → hoje na hora de cotar
     quote_result: QuoteResult | None = None   # espelho de `veiculos[0].quote_result`

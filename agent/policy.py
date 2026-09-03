@@ -10,9 +10,9 @@ verdade e `veiculo_texto/veiculo_ano/quote_result` são espelho de `veiculos[0]`
 sincronizado num ponto só (`_absorver`). Uma cotação por carro, mesmo plano
 (`DoQuotes`), e uma resposta com todos (`PresentMany`).
 
-O plano é perguntado UMA vez: se a resposta seguinte não trouxer a escolha, a
-policy assume `tools.policy.plano_padrao` e marca `plano_assumido` — a troca
-depois recota todos os carros.
+O plano é perguntado UMA vez (`plano_perguntado` marca que a pergunta saiu): se a
+resposta seguinte não trouxer a escolha, a policy assume `tools.policy.plano_padrao`
+e marca `plano_assumido` — a troca depois recota todos os carros.
 
 `Intent.CONSULTA` só chega aqui quando existe tool habilitada no painel — a
 `Conversation` normaliza para `outro` quando não existe. A policy então devolve
@@ -145,8 +145,6 @@ def next_action(
     """Decide o próximo passo. Não muta `state`: devolve uma cópia."""
     s = state.model_copy(deep=True)
     _migrar_veiculos(s)
-    # Lido ANTES de absorver (a absorção pode trocar `ultima_pergunta` numa pendência):
-    # é o que diz se a pergunta do plano já foi feita e ficou sem resposta.
     perguntou_plano = state.ultima_pergunta == "plano"
 
     # Re-entradas do conversation (não são turno novo do lead).
@@ -192,6 +190,9 @@ def next_action(
 
     # Plano perguntado UMA vez: qualquer resposta que não traga a escolha (inclusive "tanto
     # faz", ou o lead adiantando outro campo) faz a policy assumir o padrão e seguir.
+    # A marca é `plano_perguntado`, e não a última pergunta: uma pendência no meio (um CEP
+    # inválido respondendo à pergunta do plano) trocaria `ultima_pergunta` e faria o agente
+    # perguntar o plano de novo. Como a marca só é gravada ao PERGUNTAR, nunca se assume antes.
     if s.plano_id is None and perguntou_plano and _campo_faltante(s) == "plano":
         progresso = _assumir_plano(s, rules) or progresso
 
@@ -236,6 +237,8 @@ def _consulta(s: LeadState, abs_: _Absorcao) -> Action:
     campo = pendente.campo if pendente is not None else _campo_faltante(s)
     if campo is not None:
         s.ultima_pergunta = campo
+        if campo == "plano":
+            s.plano_perguntado = True   # foi perguntado pelo Responder; não se repete no template
         proxima = _t(f"diretiva.{campo}")
     else:
         proxima = _t("policy.diretiva_pos_cotacao")
@@ -498,6 +501,7 @@ def _fluxo(s: LeadState, rules: Rules, today: date) -> list[Action]:
         s.stage = _STAGE_DO_CAMPO[campo]
         s.ultima_pergunta = campo
         if campo == "plano":
+            s.plano_perguntado = True
             return [AskPlan(planos=rules.planos_resumo())]
         return [AskField(campo=campo, motivo=_contexto_da_pergunta(s, campo))]
 
