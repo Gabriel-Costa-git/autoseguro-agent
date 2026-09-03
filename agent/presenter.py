@@ -174,6 +174,8 @@ def _present(action: Present, state: LeadState) -> str:
 
     linhas = [_t("presenter.present.titulo", plano_nome=quote.plano_nome, premio=_brl(quote.premio_mensal))]
     linhas += _corpo_da_cotacao(quote, _vigencia(action.result))
+    if getattr(action, "data_assumida", False):
+        linhas.append(_t("presenter.present.vigencia_assumida"))
     if action.cep_ausente:
         linhas.append(_t("presenter.present.aviso_cep_ausente"))
     linhas.append(_cta(state, quote))

@@ -1,6 +1,6 @@
 """Configuração por variável de ambiente (.env carregado se existir).
 
-Editado só pelo orquestrador; executores pedem mudança no reporte."""
+Contratos de configuração: mudanças aqui afetam todos os módulos."""
 from __future__ import annotations
 
 import os

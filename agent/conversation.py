@@ -72,7 +72,7 @@ _SIM = frozenset({"sim", "isso", "isso mesmo", "correto", "certo", "ok", "claro"
 _NAO = frozenset({"não", "nao", "errado", "não é", "nao e", "negativo", "não!", "nao!"})
 _SO_CEP_RE = re.compile(r"^[\d\s.\-]+$")
 _COMPOSTA_RE = re.compile(r"[?,;]|\b(e|mas|ou|porém|porem)\b", re.IGNORECASE)
-# Fase 2, só a idade: "35", "35 anos", "tenho 35 anos". A faixa 16-110 é de propósito estreita —
+# Só a idade por regex: "35", "35 anos", "tenho 35 anos". A faixa 16-110 é de propósito estreita —
 # fora dela (um ano de fabricação, um CEP truncado) o modelo decide, que é o que ele sabe fazer.
 _SO_IDADE_RE = re.compile(r"^(?:tenho\s+|eu\s+tenho\s+)?(\d{1,3})(?:\s*anos?)?$", re.IGNORECASE)
 IDADE_MIN_PRE_PARSER, IDADE_MAX_PRE_PARSER = 16, 110
@@ -128,6 +128,17 @@ class _Turno:
     logger: Any
     today: date
     saidas: int = field(default=0)
+
+
+def _usage(agente: object, conversation_id: str) -> dict:
+    """`model`, `usage` e `tentativas` da última chamada, se o agente souber drenar; senão nada."""
+    drenar = getattr(agente, "drenar_usage", None)
+    if drenar is None:
+        return {}
+    try:
+        return drenar(conversation_id) or {}
+    except Exception:  # noqa: BLE001 — observabilidade não derruba o turno
+        return {}
 
 
 class Conversation:
@@ -296,6 +307,7 @@ class Conversation:
             "llm_call",
             message_id=inbound.message_id,
             papel="extractor",
+            **_usage(self.extractor, state.conversation_id),
             latency_ms=int((time.perf_counter() - inicio) * 1000),
         )
         extraction, bruto = self._normalizar_consulta(extraction)
@@ -466,6 +478,7 @@ class Conversation:
                 "llm_call",
                 message_id=turno.inbound.message_id,
                 papel="responder",
+                **_usage(self.responder, state.conversation_id),
                 directive=directive,
                 latency_ms=int((time.perf_counter() - inicio) * 1000),
             )

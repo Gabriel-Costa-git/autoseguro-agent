@@ -64,6 +64,35 @@ def _provedor_de_regras(client: QuoteClient, today: Callable[[], date]) -> Calla
     return provider
 
 
+def _trace_para_o_log(logger_factory: Callable[..., object] | None) -> Callable[[dict], None]:
+    """Hook padrão do `brain`: cada retry, erro ou guard do modelo vira um evento no JSONL da conversa.
+
+    Sem isto os eventos `llm_retry`/`llm_error`/`llm_guard` só apareciam no Lab do Studio — o log
+    da entrega tinha chamadas de 26 s sem nenhuma linha explicando. O `conversation_id` vem do
+    próprio trace (`session_id`), então um logger por conversa é aberto sob demanda e reaproveitado.
+    """
+    from agent.observability import ConversationLogger
+
+    loggers: dict[str, object] = {}
+
+    def _emitir(campos: dict) -> None:
+        evento = campos.pop("evento", "llm_call")
+        if evento == "llm_call":
+            return  # o `llm_call` de verdade é gravado pela Conversation, com latência e usage
+        cid = str(campos.pop("session_id", "") or campos.pop("conversation_id", "") or "")
+        cid = cid.removeprefix("extract-")
+        if not cid:
+            return
+        logger = loggers.get(cid)
+        if logger is None:
+            fabrica = logger_factory or ConversationLogger
+            logger = fabrica(settings.log_dir, cid)
+            loggers[cid] = logger
+        logger.event(evento, **campos)  # type: ignore[attr-defined]
+
+    return _emitir
+
+
 async def montar_conversa(
     today: Callable[[], date] = date.today,
     *,
@@ -100,6 +129,9 @@ async def montar_conversa(
             f"Não consegui ler {api}/planos ({exc}). "
             "Suba a API de cotação antes de abrir o chat — as regras de aceitação saem dela."
         ) from exc
+
+    if trace is None:
+        trace = _trace_para_o_log(logger_factory)
 
     return Conversation(
         rules=Rules.from_planos(planos, today()),

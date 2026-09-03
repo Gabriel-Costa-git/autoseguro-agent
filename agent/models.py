@@ -2,7 +2,7 @@
 Contratos compartilhados do agente AutoSeguro.
 
 Este módulo é o ponto de acoplamento entre as camadas. Regras:
-- Editado só pelo orquestrador; executores pedem mudança no reporte.
+- Contratos compartilhados: qualquer mudança aqui atravessa policy, presenter, brain e canais.
 - Tudo aqui é dado puro (Pydantic/Enum). Sem I/O, sem LLM, sem HTTP.
 - O LLM só produz `Extraction`. Quem decide é `policy.next_action`, que
   devolve `Action`s. Preço só existe dentro de `Quote`, que só nasce da API.
@@ -389,7 +389,7 @@ EventKind = Literal[
     "inbound", "outbound", "extraction", "decision",
     "quote_attempt", "quote_result", "cep_lookup", "planos_refresh",
     "llm_call", "tool_call", "handoff", "handoff_notice", "refusal", "error",
-    # F11 — o que o log escondia: retry/erro do LLM, guardrail que apagou preço, refresh
+    # Eventos de diagnóstico que o log não tinha: retry/erro do LLM, guardrail que apagou preço, refresh
     # do /planos, saída que o canal NÃO entregou, takeover devolvido por inatividade e
     # campo que veio da regex de fallback em vez do modelo.
     "llm_retry", "llm_error", "llm_guard",

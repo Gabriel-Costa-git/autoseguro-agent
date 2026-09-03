@@ -213,7 +213,7 @@ def _fallback(state: LeadState) -> str:
 
 # --------------------------------------------------------------------------- validação pós-LLM
 # O prompt é empurrão; isto é regra. Cada padrão nasceu de uma resposta REAL da auditoria da
-# Fase 3, e a ação é sempre a mesma do `guard_price`: descartar a resposta e mandar o fallback
+# Casos vistos em conversas reais; a ação é sempre a mesma do `guard_price`: descartar a resposta e mandar o fallback
 # determinístico da diretiva — o lead prefere uma pergunta seca a uma promessa que não existe.
 _HISTORICO_INVENTADO_RE = re.compile(
     r"\bcomo (?:eu )?(?:te |lhe )?(?:disse|falei|comentei|expliquei|adiantei)\b"
@@ -383,7 +383,7 @@ async def _com_retry[T](
     diz que a cota leva para liberar); senão, backoff 2 s → 4 s → 8 s.
 
     `emitir` recebe um `llm_retry` por espera e um `llm_error` na desistência: sem eles, a
-    auditoria da Fase 3 viu 6 chamadas de mais de 20 s e nenhum evento no log explicando.
+    em conversas reais houve 6 chamadas de mais de 20 s e nenhum evento no log explicando.
     """
     inicio = clock()
     tentativa = 1
@@ -639,7 +639,7 @@ class RespostaLLM(str):
     É `str` de propósito: o turno continua tratando a resposta como texto (o `conversation.py`
     não é escopo deste brief), e quem quiser saber a procedência lê `.source`. Sem isso o
     fallback determinístico saía no log rotulado `source="llm"` — foi o que a auditoria da
-    Fase 3 achou em s07b.
+    apareceu em conversa real.
     """
 
     __slots__ = ("source",)
@@ -758,7 +758,7 @@ class _AgenteLLM:
         """`arun` com teto de tempo por CHAMADA.
 
         O `_com_retry` só limitava as esperas entre tentativas; a chamada em si podia levar o
-        que quisesse — a Fase 3 mediu 51 s e 70 s, com o lead em silêncio o tempo todo. O
+        que quisesse — medimos 51 s e 70 s em conversas reais, com o lead em silêncio o tempo todo. O
         `TimeoutError` é transitório por `_e_transitorio`, então a tentativa seguinte acontece
         normalmente e, esgotado tudo, cai no fallback determinístico.
         """

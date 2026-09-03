@@ -15,7 +15,7 @@ Regras: nenhum canal derruba o turno (cada um é try/except próprio e vira um e
 `handoff_notice` com `status`), cada canal é desligável por config, e no Lab o notificador roda em
 modo `simulado` — grava o que TERIA sido enviado e não toca WhatsApp nem takeover.
 
-A ORDEM importa e mudou na F11: primeiro os avisos, o takeover só depois. Antes o agente
+A ORDEM importa: primeiro os avisos, o takeover só depois. Antes o agente
 calava (assumia a conversa) e só então tentava avisar; aviso que falhava virava `status="ok"`
 porque o `EvolutionSender` engolia o erro de HTTP. Resultado possível: lead esperando um humano
 que nunca soube dele. Agora o takeover só acontece se pelo menos um canal de aviso deu `ok`;

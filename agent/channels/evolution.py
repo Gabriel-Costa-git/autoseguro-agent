@@ -17,7 +17,7 @@ assume a conversa no Studio, a mensagem que chega vira só um evento `inbound` c
 `modo="humano"` no log e o agente NÃO é chamado. Sem `takeover` (padrão), o
 comportamento é exatamente o entregue.
 
-**Freios do canal (F11).** Em 02/09 um contato real mandou "Boa noite" e recebeu 23
+**Freios do canal.** Em 02/09 um contato real mandou "Boa noite" e recebeu 23
 respostas iguais em 80 s: cada envio nosso gerava um `messages.upsert` de protocolo
 (recibo, sem `fromMe`, sem texto), que virava turno, que virava resposta, que gerava
 outro upsert. Três freios independentes, porque cada um sozinho ainda deixa passar:
@@ -126,7 +126,7 @@ def _so_protocolo(message: dict[str, Any]) -> bool:
 
 def parse_webhook(payload: dict[str, Any]) -> Inbound | None:
     """`None` para o que não vira turno: evento diferente, grupo, eco do próprio agente,
-    sem `data` — e, desde a F11, upsert SEM CONTEÚDO (recibo/protocolo/stub de sistema).
+    sem `data` — e upsert SEM CONTEÚDO (recibo/protocolo/stub de sistema).
 
     Áudio, imagem, documento e sticker continuam virando `Inbound` (sticker em `other`):
     são mensagens de verdade, o lead as enviou, e a resposta ("pode me escrever?") faz
@@ -180,7 +180,7 @@ def _origem(payload: dict[str, Any]) -> str:
 class EvolutionSender:
     """Lado de saída: `POST /message/sendText` e `POST /chat/sendPresence`.
 
-    Nunca levanta; devolve `True`/`False`. O `False` existe desde a F11: o aviso ao
+    Nunca levanta; devolve `True`/`False`. O `False` existe porque o aviso ao
     consultor gravava `status="ok"` para mensagem que a Evolution tinha recusado.
     """
 

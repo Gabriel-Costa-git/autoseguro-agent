@@ -6,7 +6,7 @@ conversa: `logs/*.jsonl` (produção) e `logs/studio/*.jsonl` (Lab), no formato 
 `agent/observability.py`, já mascarado. `logs/entrega/` fica de fora: são cenários fixos
 da entrega, não atendimento.
 
-**O nome do arquivo não é mais o `conversation_id`.** Desde a F11 uma conversa de WhatsApp
+**O nome do arquivo não é mais o `conversation_id`.** Uma conversa de WhatsApp
 mora em `wa-<sha1(telefone)[:10]>.jsonl` (`pii.nome_arquivo_log`): o telefone não fica no
 disco onde não há máscara possível. O id verdadeiro está DENTRO de cada evento, e é ele
 que o takeover e o canal usam — daí a leitura tirar o id dos eventos e cair para o nome do
@@ -194,7 +194,7 @@ class Catalogo:
         return registro
 
     def _path(self, conversation_id: str) -> Path | None:
-        """Arquivo de uma conversa: o legado (nome em claro) ou o derivado (F11).
+        """Arquivo de uma conversa: o legado (nome em claro) ou o derivado (hash do número).
 
         Os dois existem em produção. A ordem é a MESMA do `ConversationLogger`: quando o
         arquivo antigo existe, é nele que a conversa continua sendo escrita, então é ele

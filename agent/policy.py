@@ -62,7 +62,7 @@ from agent.models import (
 )
 from agent.runtime_config import store
 
-if TYPE_CHECKING:  # pragma: no cover - só para type hints; o executor A entrega rules.py
+if TYPE_CHECKING:  # pragma: no cover - só para type hints
     from agent.rules import Rules
 
 # --------------------------------------------------------------------------- textos (slots do Studio)
@@ -465,7 +465,7 @@ def _absorver(s: LeadState, e: Extraction, rules: Rules, today: date) -> _Absorc
 
     cep8 = rules.normalize_cep(e.cep) if e.cep is not None else None
     # A pergunta pendente é o CEP? É por turno, não por mensagem com "cep" dentro: o lead que
-    # responde outra coisa também consumiu uma tentativa (foi assim que o s07a virou loop).
+    # responde outra coisa também consumiu uma tentativa (era assim que dois CEPs inválidos viravam pergunta infinita).
     pergunta_era_cep = (
         s.stage is Stage.COLETA_CEP or s.ultima_pergunta == "cep"
     ) and e.intent not in _INTENTS_QUE_NAO_RESPONDEM
@@ -550,6 +550,8 @@ def _absorver_data(
     if data is not None and not e.data_vaga:
         violacao = rules.validate_data_inicio(data) if pre_validacao else None
         if violacao is None:
+            # A mesma data que já estava assumida ("pode começar hoje" depois de cotar com hoje)
+            # não é mudança: recotar e reenviar a mesma mensagem é o que o lead lê como eco.
             out.campos_alterados = out.campos_alterados or s.data_inicio != data
             s.data_inicio = data
             s.data_assumida = False
