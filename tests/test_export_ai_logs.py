@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 
+from scripts import check_logs_pii
 from scripts.export_ai_logs import (
     MARCA_BASE64,
     MARCA_DENYLIST,
@@ -411,3 +412,22 @@ def test_janela_do_projeto_sem_git_nao_quebra(tmp_path):
     ini, fim = janela_do_projeto(tmp_path, agora=agora)
     assert fim == agora
     assert ini < agora - timedelta(days=1)
+
+
+# --------------------------------------------------------------------------- gate de PII dos logs da entrega
+def test_check_logs_pii_flaga_telefone_no_nome_do_arquivo(tmp_path, capsys):
+    arq = tmp_path / "wa-5511999990000.jsonl"
+    arq.write_text('{"event": "inbound", "data": {"texto": "oi"}}\n', encoding="utf-8")
+
+    assert check_logs_pii.main([str(arq)]) == 1
+    saida = capsys.readouterr().out
+    assert "telefone em claro no NOME do arquivo" in saida
+    assert "1 ocorrência(s) de PII em claro" in saida
+
+
+def test_check_logs_pii_passa_com_nome_e_conteudo_limpos(tmp_path, capsys):
+    arq = tmp_path / "caminho-feliz.jsonl"
+    arq.write_text('{"event": "inbound", "data": {"cep": "01310-***", "fone": "+55 ** *****-****"}}\n', encoding="utf-8")
+
+    assert check_logs_pii.main([str(arq)]) == 0
+    assert "0 ocorrência(s) de PII em claro" in capsys.readouterr().out

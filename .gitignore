@@ -9,7 +9,6 @@ logs/*.jsonl
 !logs/.gitkeep
 !logs/entrega/
 data/
-.orq/
 logs/studio/
 
 # Config versionada = prompts/tools/settings. Estes dois nascem em runtime e são

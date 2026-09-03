@@ -129,7 +129,7 @@ o que se vê quando a API está 100 % lenta. Esperar os 8 s garantiria a respost
 lenta, mas cortar em 3,5 s e tentar de novo custa menos em média (70 % de chance de resposta
 em 50 ms). O preço disso é contar o timeout como falha: com 3 tentativas, 0,3³ = 2,7 % das
 cotações escalariam por infra; com 4, 0,3⁴ ≈ 0,8 %. No primeiro timeout o lead recebe "só um
-instante"
+instante".
 `/health` é sempre OK e não reflete a instabilidade, então não serve como sinal.
 
 ### 3. Pré-validação local é atalho, não contrato
@@ -211,7 +211,7 @@ em background com um lock por conversa e envia "digitando" antes de cada respost
 texto (áudio, imagem, documento) recebe pedido para escrever.
 
 ## Testes
-`uv run pytest -q` roda <!-- n_testes -->588 testes sem rede, sem LLM e sem docker: transporte HTTP mockado
+`uv run pytest -q` roda <!-- n_testes -->590 testes sem rede, sem LLM e sem docker: transporte HTTP mockado
 para `/quote` e ViaCEP, relógio e sleep injetáveis para o retry, `FakeLLM` para o turno,
 policy e presenter puros. Há um teste que faz grep no `presenter.py` para garantir que nenhum
 valor de preço está fixo em template.
@@ -256,7 +256,25 @@ em claro. Resultado na entrega: `3 arquivo(s) verificado(s), 0 ocorrência(s) de
 
 O que quebrou em uso real virou regra no código.
 
-<!-- canal: parágrafo do executor A -->
+### Falhas tratadas no canal
+A Evolution manda `messages.upsert` para coisas que não são mensagem (recibos, chaves de
+sessão, reações, edições): o webhook descarta todo upsert sem conteúdo, e só áudio, imagem,
+documento, sticker e texto viram turno. Cada conversa tem teto de respostas por minuto
+(`tools.canal.max_respostas_por_minuto`, 6) e nunca recebe o mesmo texto duas vezes seguidas
+sem ter escrito algo no meio; o que é barrado vira um evento `outbound_suprimido` com o
+motivo, porque silêncio sem rastro é pior que ruído. Mensagens picadas do mesmo lead dentro
+de `tools.canal.debounce_s` (2 s) viram um turno só, em vez de uma resposta para cada linha.
+O aviso ao consultor agora sabe se chegou — a Evolution devolve sucesso/falha e o webhook do
+CRM tem três tentativas — e a conversa **só** é passada para o humano depois de pelo menos um
+aviso entregue: se todos falharem, o agente continua respondendo e o log diz por quê.
+Takeover automático que ninguém foi atender volta ao agente depois de
+`tools.handoff.auto_devolver_apos_min` (4 h), com um evento `takeover_expirado`.
+
+Os três parâmetros são editáveis na aba Config do Studio (origem do valor à vista):
+
+- `tools.canal.max_respostas_por_minuto` (padrão 6) — teto de respostas por conversa por minuto; o que passa disso não é enviado e vira `outbound_suprimido`.
+- `tools.canal.debounce_s` (padrão 2) — segundos em que mensagens picadas do mesmo lead se juntam num turno só; `0` desliga.
+- `tools.handoff.auto_devolver_apos_min` (padrão 240) — minutos sem mensagem humana até um takeover automático voltar ao agente, com evento `takeover_expirado`.
 
 **Loop de respostas no smoke do WhatsApp.** No primeiro teste com um número real o agente
 respondeu à saudação e, em seguida, recebeu 23 `messages.upsert` sem texto e sem remetente —
@@ -273,14 +291,14 @@ O payload real do incidente virou teste de regressão.
 ## Handoff (quando entra um humano)
 
 Quando a policy decide escalar (lead aceitou, pediu atendente, negociação, cotação indisponível,
-erro interno, fora de escopo, sem progresso), o lead recebe o texto de sempre — e, a partir da F9,
+erro interno, fora de escopo, sem progresso), o lead recebe o texto de sempre — e
 **o outro lado também fica sabendo**. `agent/handoff.py` dispara três canais independentes, cada um
 desligável e cada um virando um evento `handoff_notice` (`{canal, status, destino}`) no JSONL da
 conversa:
 
 | Canal | O que faz | Configuração |
 |---|---|---|
-| `takeover` | marca a conversa como **humana** (`config/atendimentos.json`): o webhook passa a registrar o `inbound` com `modo="humano"` e o agente para de responder aquele lead | `tools.handoff.auto_assumir` (padrão ligado) |
+| `takeover` | marca a conversa como **humana** (`config/atendimentos.json`): o webhook passa a registrar o `inbound` com `modo="humano"` e o agente para de responder aquele lead. Só acontece depois de pelo menos um aviso entregue; sem nenhum, sai `status: "nao_assumido"` e o agente continua respondendo | `tools.handoff.auto_assumir` (padrão ligado), `tools.handoff.auto_devolver_apos_min` (padrão 240) |
 | `whatsapp` | manda ao consultor um resumo com motivo, nome, telefone, origem, dados coletados, **o preço de cada carro** e o link direto de Atendimentos | `tools.handoff.consultor_number` (vem de `CONSULTOR_NUMBER`) e `tools.handoff.studio_url` |
 | `webhook` | `POST` JSON para um CRM (`{conversation_id, origem, motivo, dados, cotacoes, link, ts}`), 5 s de timeout | `tools.handoff.webhook_url` e `tools.handoff.webhook_headers` (valores aceitam `${env:X}`) |
 
