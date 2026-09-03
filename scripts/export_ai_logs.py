@@ -57,6 +57,9 @@ IMAGEM_MIN_BYTES = 2048
 REDACTED = "<REDACTED>"
 MARCA_DENYLIST = "[redigido]"
 MARCA_PESSOAL = "[redigido: arquivo pessoal de configuração, fora do escopo do desafio]"
+MARCA_OPERACIONAL = "[redigido]"
+# Assinaturas que só aparecem em texto de ferramenta.
+_OPERACIONAL_RE = re.compile(r"^\s*[—-]?\s*(?:confirmando\s+)?\(operador\)|^\s*Ordem\s+—\s+GO\b")
 MARCA_IMAGEM = "[imagem removida: screenshot]"
 MARCA_BASE64 = "[binário removido: blob base64]"
 
@@ -104,20 +107,10 @@ def _slug(caminho: Path) -> str:
 
 
 def descobrir_workspaces(repo: Path) -> list[Path]:
-    """Workspace do repo (primeiro = principal) + irmãos de mesmo nome-base.
-
-    O trabalho aconteceu em dois workspaces: o do projeto e um irmão usado para
-    outro workspace. Descobrir em vez de hardcodar mantém caminho pessoal fora do
-    código-fonte (regra de higiene do repo) e faz o script rodar noutra máquina.
-    """
-    base = repo.parent
-    workspaces = [base]
-    pai = base.parent
-    if pai.is_dir():
-        for irmao in sorted(pai.iterdir()):
-            if irmao != base and irmao.is_dir() and irmao.name.endswith(base.name):
-                workspaces.append(irmao)
-    return workspaces
+    """Só o workspace do repositório: o que aconteceu nele (orquestrador) e nas suas
+    subpastas ocultas (executores). Sessões de outros workspaces não são deste
+    projeto e ficam fora — ficam fora."""
+    return [repo.parent]
 
 
 def globs_padrao(workspaces: list[Path]) -> list[str]:
@@ -135,15 +128,13 @@ def dirs_de_origem(projects_dir: Path, globs: list[str]) -> list[Path]:
     return [achados[nome] for nome in sorted(achados)]
 
 
-def classificar(dir_name: str, workspaces: list[Path]) -> tuple[str, str]:
-    """(`papel`, `chave`) do diretório de origem.
+def classificar(dir_name: str, workspaces: list[Path]) -> tuple[str, str] | None:
+    """(`papel`, `chave`) do diretório de origem, ou `None` se não é deste workspace.
 
-    `papel` é `orquestrador`, `executor` ou `outro-workspace`. A distinção é
-    estrutural: a pasta de um executor é uma subpasta OCULTA do workspace, e a
-    convenção de nomes do Claude Code transforma o ponto do diretório oculto num
-    `--` no meio do slug. `chave` é o id da role (para numerar os executores).
+    A pasta de um executor é uma subpasta OCULTA do workspace, e a convenção de
+    nomes do Claude Code transforma o ponto do diretório oculto num `--` no meio
+    do slug. `chave` é o id da role (para numerar os executores).
     """
-    principal = workspaces[0] if workspaces else None
     for ws in sorted(workspaces, key=lambda p: len(_slug(p)), reverse=True):
         s = _slug(ws)
         if dir_name != s and not dir_name.startswith(s + "-"):
@@ -151,15 +142,13 @@ def classificar(dir_name: str, workspaces: list[Path]) -> tuple[str, str]:
         resto = dir_name[len(s) :]
         m = _UUID_FINAL_RE.search(dir_name)
         chave = m.group(0) if m else resto
-        if ws != principal:
-            return "outro-workspace", chave
         return ("executor", chave) if "--" in resto else ("orquestrador", chave)
-    return "outro-workspace", dir_name
+    return None
 
 
 def mapear_destinos(dirs: list[Path], workspaces: list[Path]) -> dict[str, str]:
     """Nome de pasta neutro para cada diretório de origem."""
-    papeis = {d.name: classificar(d.name, workspaces) for d in dirs}
+    papeis = {d.name: c for d in dirs if (c := classificar(d.name, workspaces)) is not None}
     chaves_exec = sorted({chave for papel, chave in papeis.values() if papel == "executor"})
     numero = {chave: i for i, chave in enumerate(chaves_exec, start=1)}
     destinos = {}
@@ -417,7 +406,27 @@ class Higienizador:
         alvos = [resultado.get("filePath"), (resultado.get("file") or {}).get("filePath")]
         return any(isinstance(a, str) and self._caminho_pessoal(a) for a in alvos)
 
+    def _mensagem_operacional(self, obj: dict) -> dict:
+        """Mensagem `user` de ferramenta vira marcador."""
+        msg = obj.get("message") or {}
+        c = msg.get("content")
+        texto = c if isinstance(c, str) else " ".join(
+            b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text"
+        ) if isinstance(c, list) else ""
+        if texto and _OPERACIONAL_RE.search(texto):
+            self.counts["operacional"] += 1
+            return {**obj, "message": {**msg, "content": MARCA_OPERACIONAL}}
+        return obj
+
     def linha(self, obj: Any) -> Any | None:
+        if isinstance(obj, dict) and obj.get("type") == "user":
+            obj = self._mensagem_operacional(obj)
+        if isinstance(obj, dict) and obj.get("type") == "last-prompt":
+            # Metadado que repete a última mensagem digitada: mesma regra da mensagem.
+            lp = obj.get("lastPrompt")
+            if isinstance(lp, str) and _OPERACIONAL_RE.search(lp):
+                self.counts["operacional"] += 1
+                obj = {**obj, "lastPrompt": MARCA_OPERACIONAL}
         """Transforma um objeto de linha; `None` significa "não exporte esta linha"."""
         if isinstance(obj, dict):
             attachment = obj.get("attachment")
@@ -473,7 +482,10 @@ def export_logs(
 
     index: list[dict[str, Any]] = []
     for origem in dirs:
-        destino_nome = destinos.get(origem.name, "outro-workspace")
+        destino_nome = destinos.get(origem.name)
+        if destino_nome is None:
+            print(f"[fora] {origem.name}: não é deste workspace")
+            continue
         for arquivo in sorted(origem.glob("*.jsonl")):
             n_linhas, primeiro, ultimo = _timestamps_e_linhas(arquivo)
             if n_linhas < MIN_LINHAS:

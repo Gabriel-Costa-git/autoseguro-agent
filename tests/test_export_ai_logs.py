@@ -265,23 +265,17 @@ def test_texto_sem_nada_sensivel_fica_intacto():
 
 
 # --------------------------------------------------------------------------- fontes e nomes neutros
-def test_descobrir_workspaces_pega_o_do_repo_e_os_irmaos(tmp_path):
-    (tmp_path / "espaco" / "projeto").mkdir(parents=True)
+def test_descobrir_workspaces_so_o_do_repo(tmp_path):
+    repo = tmp_path / "espaco" / "projeto"
+    repo.mkdir(parents=True)
     (tmp_path / "teste-espaco").mkdir()
-    (tmp_path / "outro").mkdir()
-
-    workspaces = descobrir_workspaces(tmp_path / "espaco" / "projeto")
-
-    assert workspaces[0] == tmp_path / "espaco"
-    assert tmp_path / "teste-espaco" in workspaces
-    assert tmp_path / "outro" not in workspaces
-
+    assert descobrir_workspaces(repo) == [tmp_path / "espaco"]
 
 def test_globs_padrao_saem_do_workspace(tmp_path):
     assert globs_padrao([tmp_path / "espaco"]) == [_slug(tmp_path / "espaco") + "*"]
 
 
-def test_classificar_separa_orquestrador_executor_e_outro-workspace(tmp_path):
+def test_classificar_separa_orquestrador_executor_e_ignora_outros(tmp_path):
     principal = tmp_path / "espaco"
     irmao = tmp_path / "teste-espaco"
     workspaces = [principal, irmao]
@@ -291,8 +285,8 @@ def test_classificar_separa_orquestrador_executor_e_outro-workspace(tmp_path):
     assert classificar(_slug(principal / "projeto"), workspaces)[0] == "orquestrador"
     assert classificar(f"{_slug(principal)}--sandbox-roles-{role}", workspaces) == ("executor", role)
     assert classificar(f"{_slug(principal / 'projeto')}--sandbox-roles-{role}", workspaces) == ("executor", role)
-    assert classificar(_slug(irmao), workspaces)[0] == "outro-workspace"
-    assert classificar(f"{_slug(irmao)}--sandbox-roles-{role}", workspaces)[0] == "outro-workspace"
+    assert classificar(_slug(irmao), [principal]) is None
+    assert classificar(f"{_slug(irmao)}--sandbox-roles-{role}", [principal]) is None
 
 
 def test_mapear_destinos_numera_executores_e_nao_vaza_o_nome_de_origem(tmp_path):
