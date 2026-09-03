@@ -103,3 +103,14 @@ def test_index_tem_a_aba_tools_reorganizada(client: TestClient):
     for elemento in ("tl-itens", "tl-detalhe", "tl-nova", "tl-nova-btn", "tl-nova-nome", "tl-nova-tipo", "tl-sem-suporte"):
         assert f'id="{elemento}"' in resp.text
     assert 'id="config-tools-cards"' in resp.text
+
+
+def test_app_js_tem_a_ficha_de_handoff(client: TestClient):
+    """A ficha de `tools.handoff` e o evento `handoff_notice` são desenhados por JS (não há id
+    fixo no HTML), então o que dá para travar aqui é o app.js servido trazer os dois."""
+    app_js = client.get("/static/app.js").text
+    assert '"quote_client", "viacep", "handoff"' in app_js  # entra na lista de Integrações
+    for campo in ("auto_assumir", "consultor_number", "webhook_url", "webhook_headers", "studio_url"):
+        assert campo in app_js
+    assert "handoff_notice" in app_js
+    assert ".badge-ev-handoff_notice" in client.get("/static/style.css").text

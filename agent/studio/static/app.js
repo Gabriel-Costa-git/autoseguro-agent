@@ -758,7 +758,15 @@ function lerCampo(id, def) {
 // -------------------------------------------------------------------------- aba Tools (Integrações)
 // Lista à esquerda (builtin + tools criadas no painel) e detalhe à direita. As tools novas moram
 // em `/api/custom-tools`; enquanto essa rota não existir, a aba funciona só com as builtin.
-const TOOLS_BUILTIN = ["quote_client", "viacep"];
+// `handoff` só aparece quando `/api/effective` traz o grupo (o backend está criando nesta frente)
+const TOOLS_BUILTIN = ["quote_client", "viacep", "handoff"];
+
+const CAMPOS_HANDOFF = [
+  { key: "auto_assumir", label: "Assumir a conversa automaticamente no handoff", type: "switch", wide: true },
+  { key: "consultor_number", label: "WhatsApp do consultor (só dígitos com DDI)", type: "text" },
+  { key: "studio_url", label: "URL do Studio (base do link no aviso)", type: "text" },
+  { key: "webhook_url", label: "Webhook (POST JSON a cada handoff)", type: "text", wide: true },
+];
 
 const CAMPOS_VIACEP = [
   { key: "enabled", label: "Habilitado", type: "switch" },
@@ -787,6 +795,8 @@ const SLOTS_DA_TOOL = {
     chaves: ["policy.txt_instabilidade", "policy.txt_aguarde", "policy.diretiva_pos_cotacao", "presenter.handoff.cotacao_indisponivel"],
     prefixos: ["presenter.present.", "presenter.cobertura.", "presenter.refuse"],
   },
+  // `presenter.handoff.aviso_consultor` (o texto que vai para o consultor) entra pelo prefixo assim que existir
+  handoff: { chaves: ["policy.txt_terminal_handoff"], prefixos: ["presenter.handoff."] },
 };
 
 const TIPOS_PARAM = ["string", "number", "integer", "boolean"];
@@ -858,8 +868,13 @@ const Tools = {
     this.renderDetalhe();
   },
 
+  /** Builtin que o backend realmente expõe (o grupo `handoff` pode não existir ainda). */
+  builtins() {
+    return TOOLS_BUILTIN.filter((id) => this.effective && this.effective[id]);
+  },
+
   existe(id) {
-    return Boolean(id && (TOOLS_BUILTIN.includes(id) || this.custom[id] || (this.rascunho && this.rascunho.nome === id)));
+    return Boolean(id && (this.builtins().includes(id) || this.custom[id] || (this.rascunho && this.rascunho.nome === id)));
   },
 
   tool(id) {
@@ -907,7 +922,7 @@ const Tools = {
   renderLista() {
     const box = el("tl-itens");
     box.innerHTML = "";
-    for (const id of TOOLS_BUILTIN) box.appendChild(this.itemLista(id, [badgeEl("builtin")], null));
+    for (const id of this.builtins()) box.appendChild(this.itemLista(id, [badgeEl("builtin")], null));
     for (const [nome, tool] of Object.entries(this.custom)) {
       box.appendChild(this.itemLista(nome, [badgeEl(tool.tipo, `tl-tipo-${tool.tipo}`)], Boolean(tool.enabled)));
     }
@@ -951,6 +966,10 @@ const Tools = {
     }
     if (this.sel === "viacep") {
       box.append(fichaTools("viacep", "viacep", CAMPOS_VIACEP, this.effective, () => this.load(this.sel)), this.blocoSlots("viacep"));
+      return;
+    }
+    if (this.sel === "handoff") {
+      box.append(this.cardHandoff(), this.blocoSlots("handoff"));
       return;
     }
     const tool = this.tool(this.sel);
@@ -1076,6 +1095,93 @@ const Tools = {
           return;
         }
         await api("/api/tools", { method: "PUT", body: { quote_client: patch } });
+        await this.load(this.sel);
+        toast("aplicado", "success");
+      })
+    );
+    return div;
+  },
+
+  cardHandoff() {
+    const g = this.effective.handoff;
+    const div = document.createElement("div");
+    div.className = "card";
+    const headers = g.webhook_headers ? g.webhook_headers.value || {} : {};
+    const temEnv = this.envVars.length > 0;
+    div.innerHTML = `
+      <h3>handoff</h3>
+      <p class="field-help">o que acontece quando a conversa passa para um humano: assumir no painel, avisar o consultor e chamar o CRM.</p>
+      <div class="card-grid">
+        ${CAMPOS_HANDOFF.filter((def) => g[def.key] !== undefined)
+          .map((def) => campoHtml(`tool-handoff-${def.key}`, def, g[def.key], `handoff/${def.key}`))
+          .join("")}
+        ${
+          g.webhook_headers === undefined
+            ? ""
+            : `<div class="field-cell wide">
+                 <div class="field-head">
+                   <span class="field-label">Headers do webhook</span>
+                   <span class="field-meta">${badgeOrigem(g.webhook_headers.origem)}${g.webhook_headers.origem === "override" ? botaoReset("handoff/webhook_headers") : ""}</span>
+                 </div>
+                 <div class="tl-pares" id="tl-handoff-headers"></div>
+                 <button type="button" class="small" id="tl-handoff-header-add">${icon("plus")} header</button>
+                 ${
+                   temEnv
+                     ? `<div class="field-dupla" style="margin-top:8px">
+                          <select id="tl-env">
+                            <option value="">inserir \${env:…} no campo em foco</option>
+                            ${this.envVars.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("")}
+                          </select>
+                        </div>
+                        <span class="field-help">o valor fica no ambiente; só o nome é gravado em config/</span>`
+                     : ""
+                 }
+               </div>`
+        }
+      </div>
+      <div class="card-actions"><button type="button" class="primary save-btn">Salvar</button></div>
+    `;
+    ligarSwitches(div);
+    const linhas = div.querySelector("#tl-handoff-headers");
+    if (linhas) {
+      for (const [k, v] of Object.entries(headers)) this.linhaPar(linhas, k, v);
+      div.querySelector("#tl-handoff-header-add").addEventListener("click", () => this.linhaPar(linhas));
+      this.ligarEnv(div);
+    }
+    div.querySelectorAll(".reset-btn").forEach((btn) => {
+      btn.addEventListener(
+        "click",
+        withLoading(btn, async () => {
+          await api(`/api/tools/${btn.dataset.path}`, { method: "DELETE" });
+          await this.load(this.sel);
+          toast("aplicado", "success");
+        })
+      );
+    });
+
+    const salvar = div.querySelector(".save-btn");
+    salvar.addEventListener(
+      "click",
+      withLoading(salvar, async () => {
+        const patch = {};
+        for (const def of CAMPOS_HANDOFF) {
+          if (g[def.key] === undefined) continue;
+          const novo = lerCampo(`tool-handoff-${def.key}`, def);
+          if (novo !== g[def.key].value) patch[def.key] = novo;
+        }
+        if (linhas) {
+          const novos = {};
+          linhas.querySelectorAll(".tl-par-row").forEach((row) => {
+            const chave = row.querySelector(".k").value.trim();
+            if (chave) novos[chave] = row.querySelector(".v").value;
+          });
+          if (JSON.stringify(novos) !== JSON.stringify(headers)) patch.webhook_headers = novos;
+        }
+        if (Object.keys(patch).length === 0) {
+          toast("nada para salvar");
+          return;
+        }
+        await api("/api/tools", { method: "PUT", body: { handoff: patch } });
         await this.load(this.sel);
         toast("aplicado", "success");
       })
@@ -1261,6 +1367,7 @@ const Tools = {
       if (ev.target.matches('input[type="text"], textarea')) ultimo = ev.target;
     });
     const select = card.querySelector("#tl-env");
+    if (!select) return; // sem variáveis de ambiente conhecidas, o seletor nem é desenhado
     select.addEventListener("change", () => {
       const nome = select.value;
       select.value = "";
@@ -1571,6 +1678,8 @@ function summarizeEvent(ev) {
       return `llm_call (${d.papel}): ${d.latency_ms} ms`;
     case "llm_trace":
       return `llm_trace (${d.papel} #${d.tentativa}): ${d.status} · ${d.latency_ms} ms`;
+    case "handoff_notice":
+      return `handoff_notice ${d.canal}: ${d.status}${d.destino ? ` · ${d.destino}` : ""}`;
     case "tool_call":
       return `tool_call ${d.tool}: ${d.status}${d.latency_ms != null ? ` · ${d.latency_ms} ms` : ""}`;
     case "handoff":

@@ -187,6 +187,7 @@ button.loading::after {
 .badge-ev-llm_call { background: #8f92e8; }
 .badge-ev-llm_trace { background: #e07cbc; }
 .badge-ev-tool_call { background: #7fd4c1; }
+.badge-ev-handoff_notice { background: #f0b48a; }
 .badge-ev-handoff { background: #f08a80; }
 .badge-ev-refusal { background: #ef9c6b; }
 .badge-ev-error { background: #ef4444; color: #fff; }
