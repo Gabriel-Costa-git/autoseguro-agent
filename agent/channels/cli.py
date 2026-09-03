@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import time
 from collections.abc import Awaitable, Callable
 from datetime import date
@@ -220,6 +221,8 @@ async def conversar(
 
 
 async def run(script: Path | None = None, conversation_id: str | None = None, delay: float | None = None) -> int:
+    # O SDK do Gemini avisa sobre AFC uma vez por processo; no terminal isso vira ruído na demo.
+    logging.getLogger("google_genai.models").setLevel(logging.ERROR)
     try:
         conv = await montar_conversa()
     except BootError as exc:
