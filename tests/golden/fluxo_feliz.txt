@@ -1,0 +1,29 @@
+# fluxo_feliz
+lead: oi, tenho 35 anos
+  agente [template]: Tenho três planos. Olha o que cada um cobre:
+
+    *Essencial* — franquia de R$ 4.500,00. Cobre colisão, roubo e furto.
+    *Completo* — franquia de R$ 3.000,00. Cobre colisão, roubo, furto, danos a terceiros e vidros.
+    *Premium* — franquia de R$ 1.500,00. Cobre colisão, roubo, furto, danos a terceiros, vidros e carro reserva.
+
+    Qual deles quer que eu cote pra você?
+lead: quero o completo
+  agente [template]: Qual o modelo e o ano de fabricação do carro?
+lead: é um Onix 2019
+  agente [template]: Qual o CEP de onde o carro dorme à noite?
+lead: meu cep é 01310-100
+  agente [template]: Achei aqui: 01310-100 — São Paulo/SP. É aí que o carro fica?
+lead: sim, é isso
+  agente [template]: Quer que o seguro comece hoje ou em outra data?
+lead: pode ser hoje
+  agente [template]: Cotei aqui o plano *Completo*:
+
+    • *R$ 209,90/mês*
+    • Franquia de R$ 3.000,00
+    • Cobre colisão, roubo, furto, danos a terceiros e vidros
+
+    Importante: roubo e furto só passam a valer 30 dias depois do início da vigência (carência).
+
+    Quer fechar? Um consultor finaliza com você. Ou prefere ver outro plano?
+
+estado: stage=apresentado handoff=- cep_ausente=False data_assumida=False chamadas_extractor=6

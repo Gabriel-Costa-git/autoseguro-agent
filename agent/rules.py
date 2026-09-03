@@ -6,11 +6,14 @@ chamada de cotação. Se `plans.json` mudar, `Rules.from_planos` acompanha.
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import date
 
 from agent.models import PlanoResumo, QuoteRequest, Violation
+
+log = logging.getLogger("autoseguro.rules")
 
 _CEP_TEXT_RE = re.compile(r"(\d{5})[\s.-]?(\d{3})")
 
@@ -114,8 +117,29 @@ class Rules:
         return violacoes
 
     def planos_resumo(self) -> list[PlanoResumo]:
-        """Lista os planos na ordem do JSON, para apresentar ao lead."""
-        return [
-            PlanoResumo(id=p["id"], nome=p["nome"], franquia=p["franquia"], coberturas=p["coberturas"])
-            for p in self.planos["planos"]
-        ]
+        """Lista os planos na ordem do JSON, para apresentar ao lead.
+
+        Plano malformado (sem `id`/`nome`/`franquia`) é FILTRADO e logado, nunca levantado: um
+        campo novo ou faltando no `/planos` não pode derrubar o turno de um lead — o resto do
+        catálogo continua vendável, e o log diz o que ficou de fora.
+        """
+        resumos: list[PlanoResumo] = []
+        for p in self.planos.get("planos") or []:
+            try:
+                resumos.append(
+                    PlanoResumo(
+                        id=str(p["id"]),
+                        nome=str(p["nome"]),
+                        franquia=float(p["franquia"]),
+                        coberturas=[str(c) for c in (p.get("coberturas") or [])],
+                    )
+                )
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                log.warning(
+                    "plano ignorado no /planos (id=%r): %s", (p or {}).get("id") if isinstance(p, dict) else p, exc
+                )
+        return resumos
+
+    def plano_ids(self) -> list[str]:
+        """Ids válidos AGORA. É contra esta lista que a policy valida `plano_id` antes de cotar."""
+        return [p.id for p in self.planos_resumo()]

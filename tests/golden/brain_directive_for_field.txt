@@ -6,5 +6,5 @@ pergunte o CEP de onde o carro dorme à noite
 pergunte o CEP de onde o carro dorme à noite (contexto: motivo x)
 pergunte qual plano ele quer cotar
 pergunte qual plano ele quer cotar (contexto: motivo x)
-pergunte a partir de quando ele quer o seguro valendo
-pergunte a partir de quando ele quer o seguro valendo (contexto: motivo x)
+pergunte em UMA frase se ele quer que o seguro comece hoje ou em outra data
+pergunte em UMA frase se ele quer que o seguro comece hoje ou em outra data (contexto: motivo x)

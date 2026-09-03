@@ -23,7 +23,7 @@ SLOTS: dict[str, dict] = {
     },
     'fallback.data_inicio': {
         'label': 'Fallback anti-preço: data_inicio', 'grupo': 'responder', 'placeholders': [],
-        'default': 'A partir de quando você quer o seguro valendo?',
+        'default': 'Quer que o seguro comece hoje ou em outra data?',
     },
     'fallback.padrao': {
         'label': 'Fallback anti-preço: padrão', 'grupo': 'responder', 'placeholders': [],
@@ -112,7 +112,7 @@ SLOTS: dict[str, dict] = {
     },
     'diretiva.data_inicio': {
         'label': 'Diretiva ao Responder: data_inicio', 'grupo': 'responder', 'placeholders': [],
-        'default': 'pergunte a partir de quando ele quer o seguro valendo',
+        'default': 'pergunte em UMA frase se ele quer que o seguro comece hoje ou em outra data',
     },
     'policy.txt_midia': {
         'label': 'Policy: TXT_MIDIA', 'grupo': 'policy', 'placeholders': [],
@@ -137,6 +137,14 @@ SLOTS: dict[str, dict] = {
     'policy.txt_instabilidade': {
         'label': 'Policy: TXT_INSTABILIDADE', 'grupo': 'policy', 'placeholders': [],
         'default': 'Tive uma instabilidade aqui do meu lado e não consegui ler sua mensagem. Pode repetir?',
+    },
+    'policy.txt_cep_ausente': {
+        'label': 'Policy: segue sem o CEP', 'grupo': 'policy', 'placeholders': [],
+        'default': 'Sem problema, sigo sem o CEP — só saiba que o valor pode variar um pouco quando a gente confirmar a região.',
+    },
+    'policy.txt_midia_2': {
+        'label': 'Policy: 2ª mídia seguida', 'grupo': 'policy', 'placeholders': [],
+        'default': 'Prefiro por escrito: não consigo ouvir áudio nem abrir arquivos por aqui. Me manda em texto?',
     },
     'policy.txt_data_passada': {
         'label': 'Policy: TXT_DATA_PASSADA', 'grupo': 'policy', 'placeholders': [],
@@ -202,6 +210,18 @@ SLOTS: dict[str, dict] = {
     'presenter.handoff.sem_progresso': {
         'label': 'Handoff: sem_progresso', 'grupo': 'presenter', 'placeholders': [],
         'default': 'Acho que por aqui não estou conseguindo te ajudar direito. Vou chamar um consultor pra falar com você.',
+    },
+    'presenter.handoff.sistema_instavel': {
+        'label': 'Handoff: sistema_instavel', 'grupo': 'presenter', 'placeholders': [],
+        'default': 'Nosso sistema está instável e não estou conseguindo ler suas mensagens direito. Para não te fazer repetir, um consultor te retorna por aqui.',
+    },
+    'presenter.handoff.so_midia': {
+        'label': 'Handoff: só mídia (áudio/imagem)', 'grupo': 'presenter', 'placeholders': [],
+        'default': 'Como só consigo ler texto por aqui, vou chamar um consultor pra falar com você — ele consegue te ouvir.',
+    },
+    'presenter.present.vigencia_assumida': {
+        'label': 'Cotação: vigência quando a data foi assumida', 'grupo': 'presenter', 'placeholders': [],
+        'default': 'Considerei a vigência a partir de hoje; se preferir outra data de início, é só me dizer.',
     },
     'presenter.confirm_cep': {
         'label': 'Confirmação de CEP', 'grupo': 'presenter', 'placeholders': ['cep', 'cidade', 'uf'],
