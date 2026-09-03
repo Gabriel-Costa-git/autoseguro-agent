@@ -1,5 +1,7 @@
 Oi, queria fazer um seguro pro meu carro
-Tenho 35 anos, meu cpf é 389.083.863-43 e meu email ursula.souza@gmail.com, whats +55 11 97224-2584
+# Dados fictícios de propósito (CPF zerado, e-mail example.com, telefone 90000-0000): o roteiro
+# existe para provar que PII não solicitada chega ao log já mascarada. Nada aqui é de uma pessoa.
+Tenho 35 anos, meu cpf é 000.000.000-00, meu email é lead@example.com e meu whats +55 11 90000-0000
 É um Onix 2022
 01310-100
 sim

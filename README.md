@@ -156,6 +156,7 @@ cotado sem CEP com aviso de que o valor é estimativa e **pode subir**.
 | `FORA_DE_ESCOPO` | sinistro, apólice existente, outro produto | o agente só vende seguro auto novo |
 | `NEGOCIACAO` | pedido explícito de desconto, ou 2ª objeção de preço | desconto é decisão comercial |
 | `SEM_PROGRESSO` | 3 turnos sem avançar a coleta | insistir irrita; humano destrava |
+| `SISTEMA_INSTAVEL` | o modelo falhou 3 turnos seguidos (não o lead) | a culpa é nossa: dizer isso, não "não consigo te ajudar" |
 
 **Recusa de negócio não é handoff.** Idade fora da faixa ou veículo velho demais recebem uma
 resposta honesta ("não temos plano para o seu perfil"), agradecimento e encerramento. No
@@ -177,6 +178,11 @@ mensagem que a provocou.
   e-mail, telefone, placa. O CEP é insumo da cotação, então o log guarda o prefixo e mascara
   os três últimos dígitos. O ViaCEP devolve endereço completo, mas só cidade/UF entram no
   estado e no log.
+- O `conversation_id` de uma conversa de WhatsApp é o número do lead (`wa-<número>`) e fica
+  **em claro dentro dos eventos**, por decisão: o painel de Atendimentos e o takeover precisam dele
+  para responder a pessoa certa. O que protege o número é o `.gitignore` (`logs/*.jsonl` nunca
+  vai ao repositório) e o nome do arquivo em hash; o gate de PII falha de propósito em qualquer
+  log real de WhatsApp, e só é verde nas conversas de demonstração em `logs/entrega/`.
 - `scripts/export_ai_logs.py` remove valores do `.env`, chaves Google e `apikey` das sessões
   exportadas, e `--check` falha se sobrar algo.
 
@@ -226,24 +232,47 @@ CLI em modo roteiro e commitadas em `logs/entrega/`.
 
 | Arquivo | Cenário | Desfecho |
 |---|---|---|
-| `logs/entrega/caminho-feliz.jsonl` | `scripts/roteiro-feliz.txt`: saudação → idade (com CPF, e-mail e telefone não solicitados) → Onix 2022 → CEP confirmado via ViaCEP → escolhe Completo → cotação → "fechado" | `present` com R$ 209,90/mês vindo da API, depois `handoff` `lead_aceitou` |
+| `logs/entrega/caminho-feliz.jsonl` | `scripts/roteiro-feliz.txt`: saudação → idade (com CPF, e-mail e telefone não solicitados) → Onix 2022 → CEP confirmado via ViaCEP → escolhe Completo → cotação → "fechado" | `present` com R$ 209,90/mês vindo da API, depois `handoff` `lead_pediu_humano` |
 | `logs/entrega/recusa-negocio.jsonl` | `scripts/roteiro-recusa.txt`: lead de 78 anos | `refusal` honesto, sem handoff, sem chamada à API |
-| `logs/entrega/quote-indisponivel-handoff.jsonl` | mesmo roteiro feliz contra a API com `QUOTE_FAILURE_RATE=1` | 4 `quote_attempt` (500/502/503/502) em 2,9 s → `quote_result` `indisponivel` → `handoff` `cotacao_indisponivel`, **nenhum valor na conversa** |
+| `logs/entrega/quote-indisponivel-handoff.jsonl` | mesmo roteiro feliz contra a API com `QUOTE_FAILURE_RATE=1` | 4 `quote_attempt` (500/502/503) em 3,2 s → `quote_result` `indisponivel` → `handoff` `cotacao_indisponivel`, **nenhum valor na conversa** |
 
 Cada linha do JSONL é um evento com `ts`, `conversation_id`, `event`, `message_id`, `quote_id`
 e `data`. O trecho do handoff do caminho feliz (resumido) mostra o que o consultor humano recebe:
 
 ```json
-{"event": "handoff", "message_id": "m8",
- "data": {"reason": "lead_aceitou",
-          "payload": {"dados": {"idade": 35, "veiculo_texto": "Onix 2022", "veiculo_ano": 2022,
-                                "cep": "01310-***", "cep_cidade": "São Paulo", "cep_uf": "SP",
-                                "plano_id": "completo", "data_inicio": null},
-                      "cotacao": {"quote_id": "q…", "outcome": "ok",
-                                  "quote": {"plano_nome": "Completo", "premio_mensal": 209.9,
-                                            "franquia": 3000.0, "carencia_dias": 30, "...": "..."},
-                                  "attempts": [{"attempt": 1, "status": "ok", "http_status": 200, "latency_ms": 20}]},
-                      "motivo": "lead_aceitou", "conversation_id": "demo-feliz-v3"}}}
+{
+  "ts": "2026-09-03T15:31:10.839155+00:00",
+  "conversation_id": "demo-feliz",
+  "event": "handoff",
+  "message_id": "m8",
+  "data": {
+    "reason": "lead_pediu_humano",
+    "payload": {
+      "dados": {
+        "nome": null,
+        "idade": 35,
+        "veiculos": [
+          {
+            "texto": "Onix 2022",
+            "ano": 2022
+          }
+        ],
+        "veiculo_texto": "Onix 2022",
+        "veiculo_ano": 2022,
+        "cep": "01310-***",
+        "cep_cidade": "São Paulo",
+        "cep_uf": "SP",
+        "cep_ausente": false,
+        "plano_id": "completo",
+        "data_inicio": "2026-09-03",
+        "data_assumida": false
+      },
+      "motivo": "lead_pediu_humano",
+      "conversation_id": "demo-feliz",
+      "quote_id": "qf42b65d3"
+    }
+  }
+}
 ```
 
 A mensagem com CPF, e-mail e telefone aparece no log já mascarada (`***.***.***-**`,

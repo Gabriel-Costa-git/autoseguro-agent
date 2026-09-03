@@ -145,6 +145,27 @@ def valores_citados(texto: str) -> set[float]:
     return achados
 
 
+def _valores_da_cotacao(state: LeadState) -> str:
+    """Todos os valores monetários que a cotação OK já tornou públicos, como texto."""
+    partes: list[str] = []
+    resultados = [v.quote_result for v in getattr(state, "veiculos", []) if getattr(v, "quote_result", None)]
+    if getattr(state, "quote_result", None):
+        resultados.append(state.quote_result)
+    for r in resultados:
+        q = getattr(r, "quote", None)
+        if q is None:
+            continue
+        for campo in ("premio_mensal", "franquia"):
+            valor = getattr(q, campo, None)
+            if valor is not None:
+                partes.append(f"R$ {valor:.2f}".replace(".", ","))
+        pr = getattr(q, "primeiro_pagamento_pro_rata", None) or getattr(q, "pro_rata", None)
+        valor_pr = getattr(pr, "valor_primeiro_pagamento", None) if pr is not None else None
+        if valor_pr is not None:
+            partes.append(f"R$ {valor_pr:.2f}".replace(".", ","))
+    return " ".join(partes)
+
+
 def _valor_inventado(text: str, state: LeadState, permitido: str = "") -> str | None:
     """Trecho de dinheiro que a resposta não podia conter, ou `None` se está tudo certo.
 
@@ -155,7 +176,9 @@ def _valor_inventado(text: str, state: LeadState, permitido: str = "") -> str | 
     forma vaga ("uns 200") nunca é citação de material nenhum.
     """
     if tem_cotacao_ok(state):
-        return None
+        # Cotação pública não é licença para inventar: só os valores que o `presenter` já
+        # mostrou (prêmio, franquia, pro-rata) podem aparecer; qualquer outro é invenção.
+        permitido = " ".join(p for p in (permitido, _valores_da_cotacao(state)) if p)
     vago = _PRECO_VAGO_RE.search(text or "")
     if vago is not None:
         return vago.group(0)

@@ -1001,3 +1001,12 @@ def test_guardrails_trazem_as_regras_de_forma():
     assert "Apresente-se só no primeiro turno, em no máximo 2 linhas." in prompt
     assert "NUNCA qualifique um plano" in prompt
     assert 'NUNCA diga "como te disse"' in prompt
+
+
+def test_guard_price_pos_cotacao_bloqueia_valor_que_nao_e_o_cotado():
+    """Cotação OK torna público o valor cotado, não qualquer valor: negociar preço novo é invenção."""
+    state = _state(stage=Stage.APRESENTADO, ultima_pergunta="plano", quote_result=quote_ok())
+    inventado = "Consigo fazer por R$ 99,00 no seu caso."
+    assert guard_price(inventado, state) != inventado
+    cotado = "Fica R$ 209,90 por mês, como te mostrei."
+    assert guard_price(cotado, state) == cotado

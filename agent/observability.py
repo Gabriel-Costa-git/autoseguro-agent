@@ -6,6 +6,10 @@ sobreviver a crash do processo sem perder histórico. `data` sempre passa por
 
 O NOME do arquivo também não é lugar de PII: `wa-<telefone>` vira `wa-<sha1(telefone)[:10]>`
 (`pii.nome_arquivo_log`). O `conversation_id` dentro dos eventos continua sendo o id interno
+(`wa-<número>`): o painel de Atendimentos e o takeover precisam dele para responder o lead.
+É PII em claro por decisão, e por isso `logs/*.jsonl` fica fora do git e o gate
+`scripts/check_logs_pii.py` só é verde para conversas de demonstração (`logs/entrega/`); um log real
+de WhatsApp SEMPRE falha no gate — a proteção do número no repositório é o `.gitignore`, não a máscara
 (`wa-<dígitos>`), que é o que o resto do sistema — takeover, Atendimentos, canal — usa.
 Arquivo antigo com o nome em claro continua sendo o destino da conversa dele: renomear
 histórico é outra tarefa (migração), e partir a conversa em dois arquivos seria pior.
