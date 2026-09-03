@@ -258,9 +258,9 @@ class Conversation:
                 await self._avisar_handoff(state, action, turno)
             return state
 
-        # `answer_with_tools` é uma `Reply` cuja diretiva manda usar as ferramentas do painel:
-        # o caminho é o mesmo (Responder + guard_price), o que muda é o texto da diretiva.
-        if action.kind in ("ask_field", "reply", "answer_with_tools"):
+        # `answer_about` e `answer_with_tools` são `Reply`s com diretiva especial (dados do produto
+        # / ferramentas do painel): o caminho é o mesmo (Responder + guard_price), muda o texto.
+        if action.kind in ("ask_field", "reply", "answer_about", "answer_with_tools"):
             if action.kind == "ask_field":
                 directive = directive_for_field(action.campo, action.motivo)
                 state.ultima_pergunta = action.campo

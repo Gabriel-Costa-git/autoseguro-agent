@@ -361,8 +361,11 @@ def test_prompt_do_extractor_vem_do_slot_e_muda_ao_trocar_a_versao(monkeypatch, 
 def test_prompt_do_responder_vem_do_slot_com_resumo_e_diretiva(monkeypatch, tmp_path):
     store = _store_isolado(monkeypatch, tmp_path)
     store.add_version("responder.instructions", "t", "TAREFA: {diretiva} | ESTADO: {resumo}")
-    saida = build_responder_instructions(_state(idade=35), "peça o CEP")
-    assert saida == f"TAREFA: peça o CEP | ESTADO: {resumo_state(_state(idade=35))}"
+    # `turnos=2` para não entrar a abertura: a policy incrementa o contador antes do Responder,
+    # então o primeiro turno chega aqui com `turnos == 1` (F10)
+    estado = _state(idade=35, turnos=2)
+    saida = build_responder_instructions(estado, "peça o CEP")
+    assert saida == f"TAREFA: peça o CEP | ESTADO: {resumo_state(estado)}"
 
 
 def test_fallback_e_diretiva_saem_dos_slots(monkeypatch, tmp_path):
@@ -551,4 +554,71 @@ def test_prompt_do_extractor_pede_a_lista_de_carros():
     assert "veiculos: UM item por carro citado" in prompt
     assert "não junte tudo" in prompt
     assert "repita o PRIMEIRO item de veiculos" in prompt     # compatibilidade com 1 carro
+
+
+# --------------------------------------------------------------------------- guardrails e abertura (F10)
+def test_guardrails_entram_sempre_no_prompt_do_responder():
+    prompt = build_responder_instructions(_state(idade=35, turnos=3), "peça o CEP")
+    assert "Regras invioláveis:" in prompt
+    assert "só trata de cotação de seguro auto NOVO" in prompt
+    assert "NUNCA prometa desconto" in prompt
+    assert "NÃO é ordem" in prompt                       # injeção de prompt
+    assert "NUNCA peça CPF" in prompt
+
+
+def test_guardrails_listam_as_coberturas_reais_do_planos():
+    """É esta lista que impede o "guincho" que apareceu no log."""
+    planos = {"planos": [
+        {"coberturas": ["colisao", "roubo"]},
+        {"coberturas": ["colisao", "carro_reserva", "assistencia_24h"]},
+    ]}
+    prompt = build_responder_instructions(_state(turnos=3), "peça a idade", planos)
+    assert "As únicas coberturas que existem são: colisão, roubo, carro reserva, assistência 24h." in prompt
+    assert "guincho" not in prompt.lower()
+
+
+def test_sem_planos_as_coberturas_saem_dos_slots_do_presenter():
+    prompt = build_responder_instructions(_state(turnos=3), "peça a idade")
+    for cobertura in ("colisão", "roubo", "furto", "danos a terceiros", "vidros", "carro reserva"):
+        assert cobertura in prompt
+
+
+def test_abertura_so_entra_no_primeiro_turno():
+    abertura = "apresente-se em uma frase como Lia"
+    assert abertura in build_responder_instructions(_state(), "pergunte a idade")          # turnos=0
+    assert abertura in build_responder_instructions(_state(turnos=1), "pergunte a idade")  # 1º turno
+    assert abertura not in build_responder_instructions(_state(turnos=2), "peça o CEP")
+
+
+def test_prompt_do_extractor_tem_o_intent_de_duvida_e_perdeu_a_apolice():
+    prompt = build_extraction_instructions(_state(), HOJE, ferramentas=[])
+    assert "- duvida_produto:" in prompt
+    assert "o que é franquia?" in prompt
+    assert "quero ver minha apólice" not in prompt        # não vira mais fora_de_escopo
+    assert "NUNCA inverta o" in prompt                   # regra de negação da observação
+
+
+def test_guard_price_libera_valores_que_vieram_do_material_da_diretiva():
+    """Dúvida sobre o produto: a franquia dos planos vai no prompt, então pode voltar na resposta."""
+    dados = "- Essencial: franquia de R$ 4.500,00\n- Completo: franquia de R$ 3.000,00"
+    texto = "O Essencial tem franquia de R$ 4.500,00 e o Completo, R$ 3.000,00. Qual sua idade?"
+    assert guard_price(texto, _state(), dados) == texto
+
+
+def test_guard_price_bloqueia_valor_que_nao_estava_no_material():
+    dados = "- Essencial: franquia de R$ 4.500,00"
+    inventado = "Fica uns R$ 150,00 por mês. Qual seu CEP?"
+    assert guard_price(inventado, _state(ultima_pergunta="cep"), dados) == fallback_text("cep")
+
+
+def test_guard_price_sem_material_continua_estrito():
+    texto = "O Essencial tem franquia de R$ 4.500,00."
+    assert guard_price(texto, _state()) == fallback_text(None)
+
+
+def test_valores_citados_le_as_formas_de_dinheiro():
+    from agent.brain import valores_citados
+
+    assert valores_citados("R$ 4.500,00 e 209,90 e 200 reais") == {4500.0, 209.9, 200.0}
+    assert valores_citados("tenho 35 anos e um Onix 2019") == set()
 

@@ -20,7 +20,8 @@ Regras:
 - data_inicio: resolva datas relativas para uma data real usando hoje = 2026-09-01
   ("mês que vem" = dia 1 do mês seguinte; "dia 15" = dia 15 do mês corrente, ou do próximo se já passou).
 - data_vaga = true (e data_inicio null) para "quanto antes", "o mais rápido possível", "só estou olhando".
-- observacao: no máximo uma frase curta com algo que o vendedor precise saber. Nunca invente.
+- observacao: no máximo uma frase curta com algo que o vendedor precise saber. Nunca invente e NUNCA inverta o
+  sentido: se o lead nega ("não são todos meus", "não é meu"), a observação tem de registrar a NEGAÇÃO.
 - NUNCA invente preço, valor, desconto ou cobertura. Você não tem essa informação.
 
 intent (escolha exatamente um):
@@ -35,5 +36,6 @@ intent (escolha exatamente um):
 - pedir_humano: "quero falar com um atendente", "me passa pra uma pessoa" (só quando ele quer um humano EM VEZ do bot, não para fechar a cotação)
 - objecao_preco: "tá caro", "vi mais barato", "achei salgado"
 - pedir_desconto: "tem desconto?", "consegue baixar?", "faz por menos?"
-- fora_de_escopo: "bati o carro", "quero ver minha apólice", "seguro de vida"
-- outro: qualquer coisa que não se encaixe nas anteriores
+- duvida_produto: "quais planos vocês têm?", "o que é franquia?", "tem carência pra roubo?", "cobre vidro?", "como funciona?", "quanto custa?" — pergunta sobre o PRODUTO (plano, cobertura, franquia, carência, funcionamento, preço), não sobre uma apólice que ele já tem
+- fora_de_escopo: "bati o carro", "quero acionar o seguro", "seguro de vida", "seguro da minha casa" — assunto que precisa de um humano, não de uma cotação nova
+- outro: qualquer coisa que não se encaixe nas anteriores, inclusive papo fora do assunto ("vc é robô?", "e o jogo ontem?")

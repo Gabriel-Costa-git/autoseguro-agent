@@ -27,7 +27,7 @@ from agent.models import (
     SendText,
     VeiculoColetado,
 )
-from agent.presenter import render
+from agent.presenter import nomes_de_coberturas, render, resumo_dos_planos
 from agent.runtime_config import ConfigStore
 
 ESTADO = LeadState(conversation_id="conv_1")
@@ -325,4 +325,38 @@ def test_um_carro_continua_com_o_texto_de_sempre():
     texto = render(_present(), ESTADO)
     assert texto.startswith("Cotei aqui o plano *Completo*:")
     assert texto.endswith("Quer fechar? Um consultor finaliza com você. Ou prefere ver outro plano?")
+
+
+# --------------------------------------------------------------------------- dados dos planos (F10)
+def _planos() -> list[PlanoResumo]:
+    return [
+        PlanoResumo(id="essencial", nome="Essencial", franquia=4500, coberturas=["colisao", "roubo", "furto"]),
+        PlanoResumo(id="completo", nome="Completo", franquia=3000,
+                    coberturas=["colisao", "roubo", "furto", "terceiros", "vidros"]),
+        PlanoResumo(id="premium", nome="Premium", franquia=1500,
+                    coberturas=["colisao", "carro_reserva", "assistencia_24h"]),
+    ]
+
+
+def test_resumo_dos_planos_tem_franquia_e_coberturas_sem_preco():
+    texto = resumo_dos_planos(_planos())
+    assert "Essencial" in texto and "Completo" in texto and "Premium" in texto
+    assert "franquia de R$ 4.500,00" in texto
+    assert "colisão, roubo e furto" in texto              # nomes legíveis, não as chaves
+    assert "carro reserva" in texto and "carro_reserva" not in texto
+    assert "/mês" not in texto and "premio" not in texto  # preço não entra: só sai da cotação
+
+
+def test_resumo_dos_planos_inclui_a_carencia_quando_existe():
+    texto = resumo_dos_planos(_planos(), {"coberturas": ["roubo", "furto"], "dias": 30})
+    assert "carência: roubo e furto só passam a valer 30 dias" in texto
+
+
+def test_resumo_dos_planos_sem_carencia_nao_inventa():
+    assert "carência" not in resumo_dos_planos(_planos())
+
+
+def test_nomes_de_coberturas_nao_repete_e_traduz():
+    assert nomes_de_coberturas(["colisao", "roubo", "colisao"]) == ["colisão", "roubo"]
+    assert nomes_de_coberturas(["cobertura_nova"]) == ["cobertura nova"]   # fallback sem quebrar
 

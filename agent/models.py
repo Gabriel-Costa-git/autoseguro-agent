@@ -69,7 +69,8 @@ class Intent(StrEnum):
     OBJECAO_PRECO = "objecao_preco"  # "tá caro", "vi mais barato"
     PEDIR_DESCONTO = "pedir_desconto"  # pede desconto/condição explicitamente → humano
     CONSULTA = "consulta"              # pergunta que uma tool do painel responde (só existe se houver tool)
-    FORA_DE_ESCOPO = "fora_de_escopo"  # sinistro, apólice existente, outro produto
+    DUVIDA_PRODUTO = "duvida_produto"  # pergunta sobre plano, cobertura, franquia, carência, preço
+    FORA_DE_ESCOPO = "fora_de_escopo"  # sinistro, outro produto, assunto que precisa de humano
     OUTRO = "outro"
 
 
@@ -243,6 +244,7 @@ class LeadState(BaseModel):
     data_inicio: date | None = None       # None → hoje na hora de cotar
     quote_result: QuoteResult | None = None   # espelho de `veiculos[0].quote_result`
     handoff_reason: HandoffReason | None = None
+    recusa_campo: str | None = None       # campo que causou a recusa ("idade"/"veiculo_ano"): permite reabrir
     turnos: int = 0
     turnos_sem_progresso: int = 0
     objecoes: int = 0
@@ -315,6 +317,16 @@ class SendText(BaseModel):
     text: str
 
 
+class AnswerAbout(BaseModel):
+    """Resposta a uma dúvida sobre o PRODUTO, com os dados reais dos planos na diretiva.
+
+    Não muda a etapa da venda: o agente responde e retoma a coleta na mesma mensagem.
+    """
+
+    kind: Literal["answer_about"] = "answer_about"
+    directive: str
+
+
 class AnswerWithTools(BaseModel):
     """Como `Reply`, mas o turno é sobre uma pergunta que uma tool do painel responde.
 
@@ -328,7 +340,7 @@ class AnswerWithTools(BaseModel):
 
 Action = Annotated[
     AskField | ConfirmCep | AskPlan | DoQuotes | Present | PresentMany | Refuse | Handoff | Reply
-    | SendText | AnswerWithTools,
+    | SendText | AnswerAbout | AnswerWithTools,
     Field(discriminator="kind"),
 ]
 

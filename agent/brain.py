@@ -27,7 +27,9 @@ from pathlib import Path
 from typing import Any
 
 from agent.config import settings
+from agent.defaults import SLOTS
 from agent.models import CampoColeta, Extraction, Intent, LeadState, QuoteOutcome
+from agent.presenter import nomes_de_coberturas
 from agent.runtime_config import store
 
 log = logging.getLogger("autoseguro.brain")
@@ -70,17 +72,35 @@ def tem_cotacao_ok(state: LeadState) -> bool:
     )
 
 
-def guard_price(text: str, state: LeadState) -> str:
+_VALOR_RE = re.compile(r"R\$\s*([\d.]+(?:,\d{2})?)|([\d.]+,\d{2})|(\d+(?:[.,]\d+)?)\s*re[aá]is", re.IGNORECASE)
+
+
+def valores_citados(texto: str) -> set[float]:
+    """Valores em dinheiro que o texto afirma (R$ 4.500,00, 209,90, "200 reais")."""
+    achados: set[float] = set()
+    for grupos in _VALOR_RE.findall(texto or ""):
+        bruto = next((g for g in grupos if g), "")
+        normalizado = bruto.replace(".", "").replace(",", ".").strip(".")
+        try:
+            achados.add(float(normalizado))
+        except ValueError:
+            continue
+    return achados
+
+
+def guard_price(text: str, state: LeadState, permitido: str = "") -> str:
     """Substitui a resposta do LLM por um fallback determinístico se ela citar dinheiro.
 
-    Só libera valor quando ele veio da API (`quote_result.outcome == OK`); nesse caso
-    o texto com preço é o do `presenter`, não do LLM, e o Responder está apenas
-    conversando em cima de uma cotação já apresentada.
+    Libera em três casos, e só neles: não há dinheiro no texto; já existe cotação OK (o valor
+    virou público pelo `presenter`); ou TODO valor citado veio do material que nós mesmos demos
+    ao modelo na diretiva (`permitido`) — é o caso da dúvida sobre o produto, em que a franquia
+    dos planos vai no prompt. Um valor a mais que o do material continua sendo invenção.
 
-    Sem toggle e sem parâmetro: este é o guardrail da regra de ouro, não é
-    configurável pelo Studio.
+    Sem toggle e sem parâmetro de config: este é o guardrail da regra de ouro.
     """
     if tem_cotacao_ok(state) or not contem_preco(text):
+        return text
+    if permitido and valores_citados(text) <= valores_citados(permitido):
         return text
     log.warning(
         "guardrail de preço disparou (conversation_id=%s, campo=%s)",
@@ -292,9 +312,37 @@ def build_extraction_instructions(
     )
 
 
-def build_responder_instructions(state: LeadState, directive: str) -> str:
-    """Prompt do Responder (slot `responder.instructions`): persona, estado e diretiva do turno."""
-    return store.text("responder.instructions", resumo=resumo_state(state), diretiva=directive)
+def coberturas_do_produto(planos: dict | None = None) -> str:
+    """Lista legível das coberturas que existem, para o prompt do Responder.
+
+    Sai do `/planos` quando ele está à mão (é a verdade do produto); sem ele, dos slots
+    `presenter.cobertura.*`, que são o mesmo vocabulário que o presenter usa com o lead. É esta
+    lista que impede o modelo de inventar "guincho".
+    """
+    chaves: list[str] = []
+    for plano in (planos or {}).get("planos", []):
+        chaves += list(plano.get("coberturas") or [])
+    if not chaves:
+        chaves = [k.removeprefix("presenter.cobertura.") for k in SLOTS if k.startswith("presenter.cobertura.")]
+    return ", ".join(nomes_de_coberturas(chaves))
+
+
+def build_responder_instructions(
+    state: LeadState, directive: str, planos: dict | None = None
+) -> str:
+    """Prompt do Responder (slot `responder.instructions`): persona, estado, diretiva e guardrails.
+
+    No PRIMEIRO turno a diretiva vem prefixada pela abertura (slot `responder.diretiva_abertura`):
+    é o único lugar em que o agente se apresenta, e vale para qualquer diretiva do turno.
+    """
+    if state.turnos <= 1:
+        directive = f"{store.text('responder.diretiva_abertura')} {directive}"
+    return store.text(
+        "responder.instructions",
+        resumo=resumo_state(state),
+        diretiva=directive,
+        guardrails=store.text("responder.guardrails", coberturas=coberturas_do_produto(planos)),
+    )
 
 
 # --------------------------------------------------------------------------- agentes agno
@@ -309,7 +357,7 @@ def _price_guard_hook(run_output: Any, run_context: Any) -> None:
     state = deps.get("state")
     if state is None or not isinstance(run_output.content, str):
         return
-    run_output.content = guard_price(run_output.content, state)
+    run_output.content = guard_price(run_output.content, state, deps.get("directive", ""))
 
 
 def _extractor_instructions(run_context: Any) -> str:
@@ -319,7 +367,7 @@ def _extractor_instructions(run_context: Any) -> str:
 
 def _responder_instructions(run_context: Any) -> str:
     deps = getattr(run_context, "dependencies", None) or {}
-    return build_responder_instructions(deps["state"], deps["directive"])
+    return build_responder_instructions(deps["state"], deps["directive"], deps.get("planos"))
 
 
 class _AgenteLLM:
@@ -500,8 +548,10 @@ class Responder(_AgenteLLM):
 
     papel = "responder"
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, planos: dict | None = None, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        # `/planos` do boot: é dele que sai a lista de coberturas dos guardrails.
+        self._planos = planos
         # `tool_call`s do último `reply` de cada conversa, à espera do turno drenar para o log.
         self._tool_calls: dict[str, list[dict[str, Any]]] = {}
 
@@ -549,7 +599,7 @@ class Responder(_AgenteLLM):
     async def reply(self, directive: str, state: LeadState, inbound_text: str) -> str:
         """Nunca devolve vazio: LLM fora do ar cai no fallback determinístico do campo."""
         session_id = state.conversation_id
-        instructions = build_responder_instructions(state, directive)
+        instructions = build_responder_instructions(state, directive, self._planos)
         entrada = inbound_text or "(sem texto)"
         tentativa = 0
         ultimo_erro: str | None = None
@@ -562,7 +612,7 @@ class Responder(_AgenteLLM):
                 run = await self.agente().arun(
                     entrada,
                     session_id=session_id,
-                    dependencies={"state": state, "directive": directive},
+                    dependencies={"state": state, "directive": directive, "planos": self._planos},
                 )
             except Exception as exc:
                 ultimo_erro = str(exc)
@@ -612,7 +662,7 @@ class Responder(_AgenteLLM):
                 if len(self._tool_calls) > 100:
                     self._tool_calls.clear()   # canal que nunca drena não vira vazamento
                 self._tool_calls[session_id] = chamadas
-        return guard_price(texto, state)
+        return guard_price(texto, state, directive)
 
 
 def _ms(inicio: float) -> int:

@@ -80,6 +80,41 @@ def _ask_plan(action: AskPlan) -> str:
     return "\n".join(linhas)
 
 
+def nomes_de_coberturas(chaves: list[str]) -> list[str]:
+    """Nomes legíveis das coberturas (`carro_reserva` → "carro reserva"), sem repetir.
+
+    Público porque o prompt do Responder precisa da MESMA lista que o lead vê nas mensagens:
+    é ela que diz ao modelo o que existe — e, por tabela, o que ele não pode inventar.
+    """
+    vistos: list[str] = []
+    for nome in _coberturas(chaves):
+        if nome not in vistos:
+            vistos.append(nome)
+    return vistos
+
+
+def resumo_dos_planos(planos: list[PlanoResumo], carencia: dict | None = None) -> str:
+    """Os planos em texto para o PROMPT (dúvida sobre o produto): franquia e coberturas, sem preço.
+
+    Fica aqui, e não na policy, pela mesma razão de sempre: quem escreve dinheiro (a franquia) é o
+    presenter, com `_brl`. Preço mensal não entra — ele só existe depois da cotação.
+    """
+    linhas = [
+        f"- {p.nome}: franquia de {_brl(p.franquia)}; cobre {_lista(nomes_de_coberturas(p.coberturas))}"
+        for p in planos
+    ]
+    # `/planos` chama de `coberturas_com_carencia`; a resposta do `/quote` chama de `coberturas`.
+    dados = carencia or {}
+    coberturas_carencia = dados.get("coberturas_com_carencia") or dados.get("coberturas") or []
+    dias = dados.get("dias")
+    if coberturas_carencia and dias:
+        linhas.append(
+            f"- carência: {_lista(nomes_de_coberturas(list(coberturas_carencia)))} só passam a valer "
+            f"{dias} dias depois do início da vigência"
+        )
+    return "\n".join(linhas)
+
+
 def _linha_plano(plano: PlanoResumo) -> str:
     return _t(
         "presenter.ask_plan.linha_plano",
@@ -305,4 +340,4 @@ def _minuscula_inicial(texto: str) -> str:
     return frase if frase.endswith((".", "!", "?")) else f"{frase}."
 
 
-__all__ = ["aviso_consultor", "render"]
+__all__ = ["aviso_consultor", "nomes_de_coberturas", "render", "resumo_dos_planos"]

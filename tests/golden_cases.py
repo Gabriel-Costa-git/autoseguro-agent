@@ -92,8 +92,12 @@ def casos() -> dict[str, str]:
     out["brain_extractor_instructions_vazio"] = brain.build_extraction_instructions(
         LeadState(conversation_id="g"), HOJE, ferramentas=[]
     )
+    # Primeiro turno (`turnos=0`): a diretiva vem prefixada pela abertura (F10).
     out["brain_responder_instructions"] = brain.build_responder_instructions(st, "peça o CEP")
-    out["brain_responder_instructions_apresentado"] = brain.build_responder_instructions(st, policy.DIRETIVA_OBJECAO)
+    # Conversa já em andamento: sem abertura, só a tarefa do turno.
+    out["brain_responder_instructions_apresentado"] = brain.build_responder_instructions(
+        st.model_copy(update={"turnos": 4}), policy.DIRETIVA_OBJECAO
+    )
     out["brain_directive_for_field"] = "\n".join(
         brain.directive_for_field(c, m) for c in ["idade", "veiculo", "cep", "plano", "data_inicio"] for m in [None, "motivo x"]
     )

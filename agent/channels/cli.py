@@ -80,7 +80,7 @@ async def montar_conversa(
         rules=Rules.from_planos(planos, today()),
         quote_client=client,
         extractor=Extractor(trace=trace),
-        responder=Responder(trace=trace),
+        responder=Responder(trace=trace, planos=planos),   # coberturas reais nos guardrails
         log_dir=settings.log_dir,
         store=InMemoryStateStore(),
         today=today,

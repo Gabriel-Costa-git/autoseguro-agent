@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import ClassVar
 
 import pytest
 
 from agent.config import settings
 from agent.models import (
+    AnswerAbout,
     AnswerWithTools,
     AskField,
     AskPlan,
@@ -43,6 +45,9 @@ HOJE = date(2026, 9, 1)
 
 class FakeRules:
     """Espelha o contrato de `rules.Rules` (idade 18–75, veículo 2006–2026 para HOJE)."""
+
+    # o `/planos` cru, como no `Rules` de verdade: é dele que sai a carência no prompt de dúvida
+    planos: ClassVar[dict] = {"regras": {"carencia": {"coberturas": ["roubo", "furto"], "dias": 30}}}
 
     def validate_idade(self, idade: int) -> Violation | None:
         if idade < 18 or idade > 75:
@@ -389,7 +394,8 @@ def test_sem_progresso_escala_para_humano():
 
 
 def test_dado_novo_zera_o_contador_de_estagnacao():
-    s, _ = _act(_state(), _extr(intent=Intent.SAUDACAO))
+    # F10: saudação e dúvida NÃO contam mais como parado; `outro` continua contando.
+    s, _ = _act(_state(), _extr(intent=Intent.OUTRO))
     assert s.turnos_sem_progresso == 1
     s, _ = _act(s, _extr(idade=35))
     assert s.turnos_sem_progresso == 0
@@ -627,7 +633,7 @@ def test_max_cep_tentativas_zero_segue_sem_cep_na_primeira_falha(store_tmp):
 
 def test_max_turnos_sem_progresso_um_escala_no_primeiro_turno_parado(store_tmp):
     store_tmp.set_overrides("tools", {"policy": {"max_turnos_sem_progresso": 1}})
-    _, acoes = _act(_state(), _extr(intent=Intent.SAUDACAO))
+    _, acoes = _act(_state(), _extr(intent=Intent.OUTRO))
     assert acoes[0].reason is HandoffReason.SEM_PROGRESSO
 
 
@@ -971,4 +977,113 @@ def test_troca_de_plano_recota_todos_os_carros():
     assert isinstance(acoes[0], DoQuotes)
     assert len(acoes[0].requests) == 2
     assert {r.plano_id for r in acoes[0].requests} == {"premium"}
+
+
+# --------------------------------------------------------------------------- dúvida sobre o produto (F10)
+def test_duvida_produto_responde_com_os_dados_e_retoma():
+    s, acoes = _act(_state(stage=Stage.COLETA_IDADE), _extr(intent=Intent.DUVIDA_PRODUTO))
+
+    assert len(acoes) == 1
+    assert isinstance(acoes[0], AnswerAbout)
+    assert acoes[0].kind == "answer_about"
+    diretiva = acoes[0].directive
+    assert "Essencial" in diretiva and "Completo" in diretiva and "Premium" in diretiva
+    assert "franquia de R$ 4.500,00" in diretiva          # franquia vem do /planos, formatada
+    assert "/mês" not in diretiva                          # preço nunca entra no prompt
+    assert "pergunte a idade do condutor principal" in diretiva   # e retoma o roteiro
+    assert s.stage is Stage.COLETA_IDADE                   # a etapa não anda por causa da dúvida
+    assert s.ultima_pergunta == "idade"
+
+
+def test_duvida_produto_aplica_os_campos_da_mesma_mensagem():
+    s, acoes = _act(_state(stage=Stage.COLETA_IDADE), _extr(intent=Intent.DUVIDA_PRODUTO, idade=35))
+    assert s.idade == 35
+    assert isinstance(acoes[0], AnswerAbout)
+    assert "plano" in acoes[0].directive                   # próxima pergunta da ordem F8
+
+
+def test_duvida_produto_leva_a_carencia_quando_os_dados_tem():
+    _, acoes = _act(_state(), _extr(intent=Intent.DUVIDA_PRODUTO))
+    assert "carência" in acoes[0].directive and "30 dias" in acoes[0].directive
+
+
+def test_duvida_produto_nao_conta_como_estagnacao():
+    s, _ = _act(_state(turnos_sem_progresso=2), _extr(intent=Intent.DUVIDA_PRODUTO))
+    assert s.turnos_sem_progresso == 0
+    assert s.stage is not Stage.HANDOFF
+
+
+def test_saudacao_nao_conta_como_estagnacao():
+    """Era isso que mandava para o humano quem só tinha dito "oi" e feito duas perguntas."""
+    s, _ = _act(_state(turnos_sem_progresso=2), _extr(intent=Intent.SAUDACAO))
+    assert s.turnos_sem_progresso == 0
+    assert s.stage is not Stage.HANDOFF
+
+
+def test_fora_de_escopo_continua_indo_para_humano_na_f10():
+    s, acoes = _act(_state(), _extr(intent=Intent.FORA_DE_ESCOPO))
+    assert isinstance(acoes[0], Handoff)
+    assert s.handoff_reason is HandoffReason.FORA_DE_ESCOPO
+
+
+# --------------------------------------------------------------------------- reabertura após recusa (F10)
+def test_recusa_de_idade_grava_o_campo():
+    s, acoes = _act(_state(stage=Stage.COLETA_IDADE), _extr(idade=17))
+    assert isinstance(acoes[0], Refuse)
+    assert s.stage is Stage.ENCERRADO_RECUSA
+    assert s.recusa_campo == "idade"
+
+
+def test_correcao_da_idade_reabre_a_conversa():
+    s, _ = _act(_state(stage=Stage.COLETA_IDADE), _extr(idade=17))
+    s, acoes = _act(s, _extr(idade=18))
+
+    assert s.stage is not Stage.ENCERRADO_RECUSA
+    assert s.idade == 18
+    assert s.recusa_campo is None and s.handoff_reason is None
+    assert not any(isinstance(a, SendText) and "encerrado" in a.text for a in acoes)
+    assert isinstance(acoes[0], AskPlan)                   # segue o roteiro (idade → plano)
+
+
+def test_correcao_do_ano_do_carro_reabre_com_ponte_para_o_responder():
+    s, _ = _act(_state(idade=35, plano_id="completo"), _extr(veiculo_ano=2005, veiculo_texto="Corsa 2005"))
+    assert s.recusa_campo == "veiculo_ano"
+
+    s, acoes = _act(s, _extr(veiculo_ano=2011, veiculo_texto="Corsa 2011"))
+    assert s.stage is not Stage.ENCERRADO_RECUSA
+    assert s.veiculo_ano == 2011
+    assert isinstance(acoes[0], AskField) and acoes[0].campo == "cep"
+    assert "corrigiu o ano do carro" in acoes[0].motivo    # ponte para o Responder
+
+
+def test_correcao_para_valor_ainda_invalido_recusa_de_novo():
+    s, _ = _act(_state(stage=Stage.COLETA_IDADE), _extr(idade=17))
+    s, acoes = _act(s, _extr(idade=16))
+
+    assert isinstance(acoes[0], Refuse)
+    assert s.stage is Stage.ENCERRADO_RECUSA
+    assert s.recusa_campo == "idade"                       # segue reabrível se corrigir de novo
+
+
+def test_mensagem_sem_correcao_continua_encerrada():
+    s, _ = _act(_state(stage=Stage.COLETA_IDADE), _extr(idade=17))
+    s, acoes = _act(s, _extr(intent=Intent.OUTRO))
+
+    assert isinstance(acoes[0], SendText)
+    assert s.stage is Stage.ENCERRADO_RECUSA
+
+
+def test_pedir_humano_em_estagio_terminal_abre_handoff():
+    """O log tinha o lead pedindo consultor e recebendo a frase de encerrado três vezes."""
+    s, _ = _act(_state(stage=Stage.COLETA_IDADE), _extr(idade=17))
+    s, acoes = _act(s, _extr(intent=Intent.PEDIR_HUMANO))
+
+    assert isinstance(acoes[0], Handoff)
+    assert s.stage is Stage.HANDOFF
+    assert s.handoff_reason is HandoffReason.LEAD_PEDIU_HUMANO
+
+
+def test_pedir_humano_com_handoff_ja_aberto_nao_reabre():
+    _, acoes = _act(_state(stage=Stage.HANDOFF), _extr(intent=Intent.PEDIR_HUMANO))
+    assert isinstance(acoes[0], SendText)                  # "um consultor já está com o seu caso"
 

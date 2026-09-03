@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any
 from agent.defaults import SLOTS
 from agent.models import (
     Action,
+    AnswerAbout,
     AnswerWithTools,
     AskField,
     AskPlan,
@@ -113,6 +114,10 @@ INTENTS_UTEIS = frozenset(
         Intent.OBJECAO_PRECO,
         Intent.PEDIR_DESCONTO,
         Intent.CONSULTA,
+        # Saudação e dúvida sobre o produto movem a conversa: contá-las como estagnação era o que
+        # mandava para o humano quem só tinha feito duas perguntas legítimas.
+        Intent.SAUDACAO,
+        Intent.DUVIDA_PRODUTO,
     }
 )
 
@@ -132,6 +137,7 @@ class _Absorcao:
     avisos: list[Action] = field(default_factory=list)      # informativos, não bloqueiam
     pendencias: list[Action] = field(default_factory=list)  # correções, bloqueiam o fluxo
     refuse: Refuse | None = None                            # recusa de negócio, encerra
+    campo_recusado: str | None = None                       # qual campo causou a recusa (permite reabrir)
     campos_alterados: bool = False
 
 
@@ -156,8 +162,23 @@ def next_action(
 
     s.turnos += 1
 
-    # Estado terminal: responde educado, sem reabrir a coleta.
+    # Estado terminal: responde educado, sem reabrir a coleta — com duas exceções.
     if s.stage in STAGES_TERMINAIS:
+        util = extraction is not None and not extraction.indisponivel
+        # 1) Pedido explícito de humano vale em QUALQUER etapa (antes ele virava a frase de encerrado).
+        if util and extraction.intent is Intent.PEDIR_HUMANO and s.stage is not Stage.HANDOFF:
+            return _handoff(s, HandoffReason.LEAD_PEDIU_HUMANO)
+        # 2) Recusa que o lead corrigiu na mensagem seguinte: reabre em vez de encerrar de novo.
+        if util and s.stage is Stage.ENCERRADO_RECUSA and _traz_correcao(s, extraction):
+            campo = s.recusa_campo or "o dado"
+            _reabrir(s)
+            abs_ = _absorver(s, extraction, rules, today)
+            if abs_.refuse is not None:      # corrigiu para outro valor inválido: recusa de novo
+                s.stage = Stage.ENCERRADO_RECUSA
+                s.recusa_campo = abs_.campo_recusado
+                return s, [abs_.refuse]
+            contexto = _t_ctx("policy.diretiva_reabertura", campo=_CAMPO_LEGIVEL.get(campo, campo))
+            return s, abs_.avisos + _fluxo(s, rules, today, contexto=contexto)
         terminal = "handoff" if s.stage is Stage.HANDOFF else "encerrado"
         texto = _t(f"policy.txt_terminal_{terminal}")
         return s, [SendText(text=texto)]
@@ -183,6 +204,7 @@ def next_action(
     abs_ = _absorver(s, extraction, rules, today)
     if abs_.refuse is not None:
         s.stage = Stage.ENCERRADO_RECUSA
+        s.recusa_campo = abs_.campo_recusado   # é por ele que a correção seguinte reabre a conversa
         return s, [abs_.refuse]
 
     progresso = abs_.campos_alterados or intent in INTENTS_UTEIS
@@ -205,6 +227,11 @@ def next_action(
     if intent is Intent.CONSULTA:
         return s, abs_.avisos + [_consulta(s, abs_)]
 
+    # Dúvida sobre o PRODUTO (plano, cobertura, franquia, carência, preço): responde com os dados
+    # reais e retoma a coleta. Antes isso caía em `outro` e o agente enrolava ou inventava.
+    if intent is Intent.DUVIDA_PRODUTO:
+        return s, abs_.avisos + [_duvida_produto(s, abs_, rules)]
+
     if abs_.pendencias:
         return s, abs_.avisos + abs_.pendencias
 
@@ -224,24 +251,73 @@ def next_action(
     return s, abs_.avisos + _fluxo(s, rules, today)
 
 
-# --------------------------------------------------------------------------- consulta com ferramenta
-def _consulta(s: LeadState, abs_: _Absorcao) -> Action:
-    """Diretiva do turno de consulta: responder com a ferramenta e emendar a próxima pergunta.
+# --------------------------------------------------------------------------- perguntas do lead
+def _proxima_pergunta(s: LeadState, abs_: _Absorcao) -> str:
+    """O que o agente retoma depois de responder: a pendência, o próximo campo, ou o pós-cotação.
 
-    Não mexe em `stage` (a etapa da venda não anda por causa de uma dúvida), mas grava
-    `ultima_pergunta`: a pergunta VAI junto na mesma mensagem, e o Extractor do turno seguinte
-    precisa dela para desambiguar um "35".
+    Marca `ultima_pergunta`/`plano_perguntado` porque a pergunta VAI junto na mesma mensagem — o
+    Extractor do turno seguinte precisa saber o que foi perguntado para desambiguar um "35".
     """
     pendente = next((a for a in abs_.pendencias if a.kind == "ask_field"), None)
     campo = pendente.campo if pendente is not None else _campo_faltante(s)
-    if campo is not None:
-        s.ultima_pergunta = campo
-        if campo == "plano":
-            s.plano_perguntado = True   # foi perguntado pelo Responder; não se repete no template
-        proxima = _t(f"diretiva.{campo}")
-    else:
-        proxima = _t("policy.diretiva_pos_cotacao")
-    return AnswerWithTools(directive=_t_ctx("responder.diretiva_consulta", proxima=proxima))
+    if campo is None:
+        return _t("policy.diretiva_pos_cotacao")
+    s.ultima_pergunta = campo
+    if campo == "plano":
+        s.plano_perguntado = True   # foi perguntado pelo Responder; não se repete no template
+    return _t(f"diretiva.{campo}")
+
+
+def _consulta(s: LeadState, abs_: _Absorcao) -> Action:
+    """Diretiva do turno de consulta: responder com a ferramenta e emendar a próxima pergunta."""
+    return AnswerWithTools(
+        directive=_t_ctx("responder.diretiva_consulta", proxima=_proxima_pergunta(s, abs_))
+    )
+
+
+def _duvida_produto(s: LeadState, abs_: _Absorcao, rules: Rules) -> Action:
+    """Diretiva da dúvida sobre o produto: os dados REAIS dos planos + a próxima pergunta.
+
+    A lista vai no prompt (e não numa mensagem de template) porque a resposta tem de caber na
+    conversa: o lead perguntou uma coisa e continua sendo perguntado outra na mesma mensagem.
+    """
+    proxima = _proxima_pergunta(s, abs_)
+    return AnswerAbout(
+        directive=_t_ctx("responder.diretiva_duvida", planos=_dados_dos_planos(rules), proxima=proxima)
+    )
+
+
+def _dados_dos_planos(rules: Rules) -> str:
+    """Planos + carência em texto, direto do `/planos` (o presenter formata; aqui não há preço)."""
+    from agent.presenter import resumo_dos_planos
+
+    carencia = (getattr(rules, "planos", None) or {}).get("regras", {}).get("carencia")
+    return resumo_dos_planos(rules.planos_resumo(), carencia)
+
+
+# --------------------------------------------------------------------------- reabertura após recusa
+_CAMPO_LEGIVEL = {"idade": "a idade", "veiculo_ano": "o ano do carro"}
+
+
+def _traz_correcao(s: LeadState, e: Extraction) -> bool:
+    """A mensagem traz um valor NOVO para o campo que causou a recusa?
+
+    Válido ou não: quem decide é a absorção logo em seguida. Corrigir para outro valor fora da
+    faixa merece a recusa de novo (com o motivo), não a frase de "atendimento encerrado".
+    """
+    if s.recusa_campo == "idade":
+        return e.idade is not None
+    if s.recusa_campo == "veiculo_ano":
+        return any(v.ano is not None for v in _veiculos_da_extracao(e))
+    return False
+
+
+def _reabrir(s: LeadState) -> None:
+    """Volta a conversa para a coleta: o erro de digitação não pode custar a venda."""
+    s.stage = Stage.INICIO
+    s.handoff_reason = None
+    s.recusa_campo = None
+    s.turnos_sem_progresso = 0
 
 
 # --------------------------------------------------------------------------- absorção
@@ -257,6 +333,7 @@ def _absorver(s: LeadState, e: Extraction, rules: Rules, today: date) -> _Absorc
         violacao = rules.validate_idade(e.idade) if pre_validacao else None
         if violacao is not None:
             out.refuse = Refuse(motivo=violacao.motivo)
+            out.campo_recusado = "idade"
             return out
         out.campos_alterados = out.campos_alterados or s.idade != e.idade
         s.idade = e.idade
@@ -378,6 +455,7 @@ def _absorver_veiculos(
             violacao = rules.validate_veiculo_ano(ano)
             if violacao is not None:
                 out.refuse = Refuse(motivo=violacao.motivo)
+                out.campo_recusado = "veiculo_ano"
                 return out.refuse
 
         indice = _casar_veiculo(s.veiculos, novo)
@@ -493,8 +571,12 @@ def _contexto_da_pergunta(s: LeadState, campo: CampoColeta) -> str | None:
     return None
 
 
-def _fluxo(s: LeadState, rules: Rules, today: date) -> list[Action]:
-    """Pergunta o próximo campo faltante ou dispara a cotação de TODOS os carros."""
+def _fluxo(s: LeadState, rules: Rules, today: date, contexto: str | None = None) -> list[Action]:
+    """Pergunta o próximo campo faltante ou dispara a cotação de TODOS os carros.
+
+    `contexto` é uma ponte para o Responder (ex.: "o lead corrigiu a idade; agradeça e siga") que
+    entra como `motivo` da pergunta — o mesmo caminho do contexto de vários carros.
+    """
     campo = _campo_faltante(s)
     if campo is not None:
         s.stage = _STAGE_DO_CAMPO[campo]
@@ -502,7 +584,7 @@ def _fluxo(s: LeadState, rules: Rules, today: date) -> list[Action]:
         if campo == "plano":
             s.plano_perguntado = True
             return [AskPlan(planos=rules.planos_resumo())]
-        return [AskField(campo=campo, motivo=_contexto_da_pergunta(s, campo))]
+        return [AskField(campo=campo, motivo=contexto or _contexto_da_pergunta(s, campo))]
 
     s.stage = Stage.COTANDO
     s.quote_result = None  # cotação nova: o resultado antigo não vale mais
