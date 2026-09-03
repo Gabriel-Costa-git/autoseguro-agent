@@ -10,12 +10,13 @@ from agent.models import (
     AskField,
     AskPlan,
     ConfirmCep,
-    DoQuote,
+    DoQuotes,
     Handoff,
     HandoffReason,
     LeadState,
     PlanoResumo,
     Present,
+    PresentMany,
     ProRata,
     Quote,
     QuoteOutcome,
@@ -24,6 +25,7 @@ from agent.models import (
     Refuse,
     Reply,
     SendText,
+    VeiculoColetado,
 )
 from agent.presenter import render
 from agent.runtime_config import ConfigStore
@@ -199,10 +201,12 @@ def test_send_text_e_repassado_literalmente():
     [
         AskField(campo="idade"),
         Reply(directive="qualquer coisa"),
-        DoQuote(
-            request=QuoteRequest(
-                plano_id="completo", idade=35, veiculo_ano=2019, data_inicio="2026-09-01"
-            )
+        DoQuotes(
+            requests=[
+                QuoteRequest(
+                    plano_id="completo", idade=35, veiculo_ano=2019, data_inicio="2026-09-01"
+                )
+            ]
         ),
     ],
 )
@@ -246,3 +250,79 @@ def test_cobertura_desconhecida_cai_no_fallback(store_tmp):
     """Cobertura nova da API (sem slot) não pode quebrar a apresentação."""
     texto = render(_present(coberturas=["pneu_furado"]), ESTADO)
     assert "pneu furado" in texto
+
+
+# --------------------------------------------------------------------------- PresentMany (F8)
+def _resultado(outcome: QuoteOutcome = QuoteOutcome.OK, motivo: str | None = None, **kw) -> QuoteResult:
+    return QuoteResult(
+        quote_id="q_1",
+        outcome=outcome,
+        request=QuoteRequest(
+            plano_id="completo", idade=35, veiculo_ano=2019, cep="01001000", data_inicio="2026-09-01",
+        ),
+        quote=_quote(**kw) if outcome is QuoteOutcome.OK else None,
+        motivo_recusa=motivo,
+    )
+
+
+def _carro(texto: str, ano: int, **kw) -> VeiculoColetado:
+    return VeiculoColetado(texto=texto, ano=ano, quote_result=_resultado(**kw))
+
+
+def test_present_many_traz_um_bloco_por_carro_e_um_cta_so():
+    acao = PresentMany(
+        resultados=[
+            _carro("Onix 2022", 2022, premio_mensal=209.9),
+            _carro("HB20 2020", 2020, premio_mensal=189.5),
+        ]
+    )
+    texto = render(acao, ESTADO)
+
+    assert texto.startswith("Cotei os 2 carros no plano *Completo*:")
+    assert "*Onix 2022*" in texto and "*HB20 2020*" in texto
+    assert "R$ 209,90/mês" in texto and "R$ 189,50/mês" in texto
+    assert texto.count("Quer fechar?") == 1          # um fechamento, não um por carro
+
+
+def test_present_many_cita_recusado_e_pendente_sem_preco():
+    acao = PresentMany(
+        resultados=[
+            _carro("Onix 2022", 2022, premio_mensal=209.9),
+            _carro("Fusca 1980", 1980, outcome=QuoteOutcome.RECUSA, motivo="Veículo com mais de 20 anos não é aceito."),
+            _carro("Gol 2015", 2015, outcome=QuoteOutcome.INDISPONIVEL),
+        ]
+    )
+    texto = render(acao, ESTADO)
+
+    assert "*Fusca 1980*: não consigo cotar — veículo com mais de 20 anos não é aceito." in texto
+    assert "em seguida" in texto and "Gol 2015" in texto
+    assert texto.count("/mês") == 1                  # só o carro que cotou tem preço
+
+
+def test_present_many_sem_nenhum_ok_e_erro_de_programacao():
+    acao = PresentMany(resultados=[_carro("Gol 2015", 2015, outcome=QuoteOutcome.INDISPONIVEL)])
+    with pytest.raises(ValueError, match="pelo menos uma cotação OK"):
+        render(acao, ESTADO)
+
+
+def test_present_many_avisa_estimativa_quando_falta_cep():
+    acao = PresentMany(resultados=[_carro("Onix 2022", 2022)], cep_ausente=True)
+    assert "estimativa" in render(acao, ESTADO)
+
+
+def test_cta_muda_quando_o_plano_foi_assumido():
+    estado = LeadState(conversation_id="conv_1", plano_assumido=True)
+    texto_um = render(_present(), estado)
+    texto_varios = render(PresentMany(resultados=[_carro("Onix 2022", 2022)]), estado)
+
+    for texto in (texto_um, texto_varios):
+        assert "prefere ver o Completo ou o Premium?" in texto
+        assert "Quer fechar?" not in texto
+
+
+def test_um_carro_continua_com_o_texto_de_sempre():
+    """O `Present` de 1 carro é o entregue: mesmo corpo, mesmo CTA (goldens intactos)."""
+    texto = render(_present(), ESTADO)
+    assert texto.startswith("Cotei aqui o plano *Completo*:")
+    assert texto.endswith("Quer fechar? Um consultor finaliza com você. Ou prefere ver outro plano?")
+

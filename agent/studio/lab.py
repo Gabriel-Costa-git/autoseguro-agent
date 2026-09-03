@@ -156,6 +156,14 @@ def resumir_state(state: LeadState | None) -> dict[str, Any]:
         "stage": state.stage.value,
         "lead_nome": state.lead_nome,
         "idade": state.idade,
+        "veiculos": [
+            {
+                "texto": v.texto,
+                "ano": v.ano,
+                "cotacao": v.quote_result.outcome.value if v.quote_result else None,
+            }
+            for v in state.veiculos
+        ],
         "veiculo_texto": state.veiculo_texto,
         "veiculo_ano": state.veiculo_ano,
         "cep": state.cep,
@@ -164,6 +172,7 @@ def resumir_state(state: LeadState | None) -> dict[str, Any]:
         "cep_confirmado": state.cep_confirmado,
         "cep_ausente": state.cep_ausente,
         "plano_id": state.plano_id,
+        "plano_assumido": state.plano_assumido,
         "data_inicio": state.data_inicio.isoformat() if state.data_inicio else None,
         "ultima_pergunta": state.ultima_pergunta,
         "turnos": state.turnos,

@@ -12,7 +12,7 @@ from agent.models import (
     AskPlan,
     CepInfo,
     ConfirmCep,
-    DoQuote,
+    DoQuotes,
     Extraction,
     Handoff,
     HandoffReason,
@@ -21,6 +21,7 @@ from agent.models import (
     PlanoId,
     PlanoResumo,
     Present,
+    PresentMany,
     ProRata,
     Quote,
     QuoteOutcome,
@@ -30,6 +31,8 @@ from agent.models import (
     Reply,
     SendText,
     Stage,
+    VeiculoColetado,
+    VeiculoExtraido,
     Violation,
 )
 from agent.policy import DIRETIVA_POS_COTACAO, TXT_INSTABILIDADE, TXT_MIDIA, next_action
@@ -166,13 +169,21 @@ def test_caminho_feliz_turno_a_turno():
     assert acoes == [AskField(campo="idade")]
     assert s.stage is Stage.COLETA_IDADE
 
+    # F8: o plano é a 2ª pergunta — ele vale para todos os carros do lead
     s, acoes = _act(s, _extr(idade=35))
-    assert acoes == [AskField(campo="veiculo")]
+    assert isinstance(acoes[0], AskPlan)
+    assert len(acoes[0].planos) == 3
+    assert s.stage is Stage.ESCOLHA_PLANO
+
+    s, acoes = _act(s, _extr(intent=Intent.ESCOLHER_PLANO, plano_id="completo"))
+    assert acoes == [AskField(campo="veiculo", motivo=None)]
     assert s.stage is Stage.COLETA_VEICULO
+    assert s.plano_assumido is False
 
     s, acoes = _act(s, _extr(veiculo_texto="Onix 2019", veiculo_ano=2019))
-    assert acoes == [AskField(campo="cep")]
+    assert acoes == [AskField(campo="cep", motivo=None)]
     assert s.veiculo_texto == "Onix 2019"
+    assert [(v.texto, v.ano) for v in s.veiculos] == [("Onix 2019", 2019)]
 
     s, acoes = _act(s, _extr(cep="01001-000"))
     assert acoes == []  # aguardando o lookup do conversation
@@ -184,17 +195,14 @@ def test_caminho_feliz_turno_a_turno():
     assert acoes == [ConfirmCep(cep="01001000", cidade="São Paulo", uf="SP")]
 
     s, acoes = _act(s, _extr(intent=Intent.CONFIRMAR))
-    assert isinstance(acoes[0], AskPlan)
-    assert len(acoes[0].planos) == 3
-    assert s.stage is Stage.ESCOLHA_PLANO
-
-    s, acoes = _act(s, _extr(intent=Intent.ESCOLHER_PLANO, plano_id="completo"))
     assert acoes == [
-        DoQuote(
-            request=QuoteRequest(
-                plano_id="completo", idade=35, veiculo_ano=2019, cep="01001000",
-                data_inicio="2026-09-01",
-            )
+        DoQuotes(
+            requests=[
+                QuoteRequest(
+                    plano_id="completo", idade=35, veiculo_ano=2019, cep="01001000",
+                    data_inicio="2026-09-01",
+                )
+            ]
         )
     ]
     assert s.stage is Stage.COTANDO
@@ -319,8 +327,8 @@ def test_cotacao_sem_cep_vai_sem_cep_no_request():
         _completo(cep=None, cep_confirmado=False, cep_ausente=True, plano_id=None),
         _extr(intent=Intent.ESCOLHER_PLANO, plano_id="completo"),
     )
-    assert isinstance(acoes[0], DoQuote)
-    assert acoes[0].request.cep is None
+    assert isinstance(acoes[0], DoQuotes)
+    assert acoes[0].requests[0].cep is None
 
 
 # --------------------------------------------------------------------------- data de início
@@ -332,8 +340,8 @@ def test_data_no_passado_avisa_e_nao_grava():
 
 def test_data_futura_vai_para_a_cotacao():
     s, acoes = _act(_completo(plano_id=None), _extr(plano_id="completo", data_inicio=date(2026, 10, 1)))
-    assert isinstance(acoes[0], DoQuote)
-    assert acoes[0].request.data_inicio == "2026-10-01"
+    assert isinstance(acoes[0], DoQuotes)
+    assert acoes[0].requests[0].data_inicio == "2026-10-01"
     assert s.data_inicio == date(2026, 10, 1)
 
 
@@ -477,8 +485,8 @@ def test_pedido_explicito_de_desconto_vai_direto_para_negociacao():
 def test_troca_de_plano_recota(novo_plano: PlanoId):
     estado = _completo(stage=Stage.APRESENTADO, quote_result=_result())
     s, acoes = _act(estado, _extr(intent=Intent.ESCOLHER_PLANO, plano_id=novo_plano))
-    assert isinstance(acoes[0], DoQuote)
-    assert acoes[0].request.plano_id == novo_plano
+    assert isinstance(acoes[0], DoQuotes)
+    assert acoes[0].requests[0].plano_id == novo_plano
     assert s.stage is Stage.COTANDO
     assert s.quote_result is None  # resultado antigo descartado
 
@@ -640,15 +648,17 @@ def test_sem_pre_validacao_local_idade_fora_da_faixa_nao_recusa(store_tmp):
     s, acoes = _act(_state(stage=Stage.COLETA_IDADE), _extr(idade=80))
     assert not any(isinstance(a, Refuse) for a in acoes)
     assert s.idade == 80
-    assert acoes == [AskField(campo="veiculo")]
+    assert isinstance(acoes[0], AskPlan)      # F8: plano é a pergunta seguinte à idade
 
 
 def test_sem_pre_validacao_local_veiculo_antigo_vai_para_a_api(store_tmp):
     _sem_pre_validacao(store_tmp)
-    s, acoes = _act(_state(idade=35), _extr(veiculo_ano=2005, veiculo_texto="Corolla 2005"))
+    s, acoes = _act(
+        _state(idade=35, plano_id="completo"), _extr(veiculo_ano=2005, veiculo_texto="Corolla 2005")
+    )
     assert not any(isinstance(a, Refuse) for a in acoes)
     assert s.veiculo_ano == 2005
-    assert acoes == [AskField(campo="cep")]
+    assert acoes == [AskField(campo="cep", motivo=None)]
 
 
 def test_sem_pre_validacao_local_ano_futuro_ainda_pergunta(store_tmp):
@@ -695,8 +705,8 @@ def test_consulta_aplica_os_campos_da_mesma_mensagem_antes():
 
     assert s.idade == 35
     assert isinstance(acoes[0], AnswerWithTools)
-    assert "pergunte o modelo e o ano de fabricação do carro" in acoes[0].directive  # próxima do roteiro
-    assert s.ultima_pergunta == "veiculo"
+    assert "pergunte qual plano ele quer cotar" in acoes[0].directive   # próxima do roteiro (F8)
+    assert s.ultima_pergunta == "plano"
 
 
 def test_consulta_nao_conta_como_turno_sem_progresso():
@@ -707,7 +717,9 @@ def test_consulta_nao_conta_como_turno_sem_progresso():
 
 def test_consulta_com_pendencia_vira_a_proxima_pergunta():
     """Ano-modelo pendente + dúvida: responde a dúvida e emenda a correção pendente."""
-    s, acoes = _act(_state(idade=35), _extr(intent=Intent.CONSULTA, veiculo_ano=2027))
+    s, acoes = _act(
+        _state(idade=35, plano_id="completo"), _extr(intent=Intent.CONSULTA, veiculo_ano=2027)
+    )
     assert isinstance(acoes[0], AnswerWithTools)
     assert "pergunte o modelo e o ano de fabricação do carro" in acoes[0].directive
     assert s.veiculo_ano is None                  # o ano suspeito continua não sendo gravado
@@ -738,4 +750,191 @@ def test_diretiva_de_consulta_vem_do_slot(store_tmp):
     store_tmp.add_version("responder.diretiva_consulta", "v2", "consulte a ferramenta e depois: {proxima}")
     _, acoes = _act(_state(stage=Stage.COLETA_IDADE), _extr(intent=Intent.CONSULTA))
     assert acoes[0].directive == "consulte a ferramenta e depois: pergunte a idade do condutor principal"
+
+
+# --------------------------------------------------------------------------- plano assumido (F8)
+def _esperando_plano(**kw) -> LeadState:
+    """Estado logo depois do `AskPlan`: idade coletada, plano pendente."""
+    return _state(idade=35, stage=Stage.ESCOLHA_PLANO, ultima_pergunta="plano", **kw)
+
+
+def test_plano_assumido_quando_o_lead_nao_sabe():
+    s, acoes = _act(_esperando_plano(), _extr(intent=Intent.NAO_SEI))
+    assert s.plano_id == "essencial"
+    assert s.plano_assumido is True
+    assert not any(isinstance(a, AskPlan) for a in acoes)     # nunca repete a pergunta
+    assert acoes == [AskField(campo="veiculo", motivo=None)]  # segue o roteiro
+
+
+def test_plano_assumido_quando_o_lead_avanca_outro_campo():
+    s, acoes = _act(_esperando_plano(), _extr(veiculo_texto="Onix 2019", veiculo_ano=2019))
+    assert s.plano_id == "essencial" and s.plano_assumido is True
+    assert acoes == [AskField(campo="cep", motivo=None)]
+
+
+def test_plano_assumido_conta_como_progresso():
+    """Assumir é avançar: um "tanto faz" não pode empurrar a conversa para o humano."""
+    s, _ = _act(_esperando_plano(turnos_sem_progresso=2), _extr(intent=Intent.OUTRO))
+    assert s.plano_assumido is True
+    assert s.turnos_sem_progresso == 0
+    assert s.stage is not Stage.HANDOFF
+
+
+def test_plano_escolhido_depois_desmarca_o_assumido():
+    s, _ = _act(_esperando_plano(), _extr(intent=Intent.NAO_SEI))
+    s, _ = _act(s, _extr(intent=Intent.ESCOLHER_PLANO, plano_id="premium"))
+    assert s.plano_id == "premium" and s.plano_assumido is False
+
+
+def test_plano_padrao_vem_do_parametro(store_tmp):
+    store_tmp.set_overrides("tools", {"policy": {"plano_padrao": "premium"}})
+    s, _ = _act(_esperando_plano(), _extr(intent=Intent.NAO_SEI))
+    assert s.plano_id == "premium" and s.plano_assumido is True
+
+
+def test_plano_padrao_invalido_cai_no_primeiro_da_api(store_tmp):
+    """Parâmetro digitado errado no Studio não pode virar 422 na cara do lead."""
+    store_tmp.set_overrides("tools", {"policy": {"plano_padrao": "nao_existe"}})
+    s, _ = _act(_esperando_plano(), _extr(intent=Intent.NAO_SEI))
+    assert s.plano_id == "essencial"      # 1º do /planos
+
+
+def test_pergunta_do_plano_nao_e_assumida_antes_de_ser_feita():
+    s, acoes = _act(_state(stage=Stage.COLETA_IDADE), _extr(idade=35))
+    assert isinstance(acoes[0], AskPlan)
+    assert s.plano_id is None and s.plano_assumido is False
+
+
+# --------------------------------------------------------------------------- vários carros (F8)
+def _carros(*pares) -> Extraction:
+    return _extr(veiculos=[VeiculoExtraido(texto=t, ano=a) for t, a in pares])
+
+
+def test_dois_carros_viram_dois_requests_do_mesmo_plano():
+    estado = _state(idade=35, plano_id="completo", cep="01001000", cep_confirmado=True)
+    s, acoes = _act(estado, _carros(("Onix 2022", 2022), ("HB20 2020", 2020)))
+
+    assert [(v.texto, v.ano) for v in s.veiculos] == [("Onix 2022", 2022), ("HB20 2020", 2020)]
+    assert s.veiculo_texto == "Onix 2022" and s.veiculo_ano == 2022   # espelho do primeiro
+    assert isinstance(acoes[0], DoQuotes)
+    assert [r.veiculo_ano for r in acoes[0].requests] == [2022, 2020]
+    assert {r.plano_id for r in acoes[0].requests} == {"completo"}
+    assert {r.idade for r in acoes[0].requests} == {35}
+    assert {r.cep for r in acoes[0].requests} == {"01001000"}
+
+
+def test_carro_sem_ano_segura_a_cotacao_e_diz_qual_e():
+    estado = _state(idade=35, plano_id="completo", cep="01001000", cep_confirmado=True)
+    s, acoes = _act(estado, _carros(("Onix 2022", 2022), ("HB20", None)))
+
+    assert len(s.veiculos) == 2
+    assert isinstance(acoes[0], AskField) and acoes[0].campo == "veiculo"
+    assert "HB20" in acoes[0].motivo
+
+
+def test_ano_informado_depois_completa_o_carro_certo():
+    estado = _state(idade=35, plano_id="completo", cep="01001000", cep_confirmado=True)
+    s, _ = _act(estado, _carros(("Onix 2022", 2022), ("HB20", None)))
+    s, acoes = _act(s, _extr(veiculos=[VeiculoExtraido(texto="HB20", ano=2020)]))
+
+    assert [(v.texto, v.ano) for v in s.veiculos] == [("Onix 2022", 2022), ("HB20", 2020)]
+    assert isinstance(acoes[0], DoQuotes) and len(acoes[0].requests) == 2
+
+
+def test_teto_de_carros_avisa_uma_vez_e_ignora_o_excedente(store_tmp):
+    store_tmp.set_overrides("tools", {"policy": {"max_veiculos": 2}})
+    estado = _state(idade=35, plano_id="completo", cep="01001000", cep_confirmado=True)
+    s, acoes = _act(estado, _carros(("Onix 2022", 2022), ("HB20 2020", 2020), ("Gol 2015", 2015)))
+
+    assert [v.texto for v in s.veiculos] == ["Onix 2022", "HB20 2020"]
+    avisos = [a for a in acoes if isinstance(a, SendText)]
+    assert len(avisos) == 1 and "2 carros" in avisos[0].text
+
+
+def test_pergunta_seguinte_avisa_que_sao_varios_carros():
+    estado = _state(idade=35, plano_id="completo")
+    _, acoes = _act(estado, _carros(("Onix 2022", 2022), ("HB20 2020", 2020)))
+    assert isinstance(acoes[0], AskField) and acoes[0].campo == "cep"
+    assert "Onix 2022; HB20 2020" in acoes[0].motivo
+
+
+def test_um_carro_nao_ganha_contexto_de_varios():
+    estado = _state(idade=35, plano_id="completo")
+    _, acoes = _act(estado, _carros(("Onix 2022", 2022)))
+    assert acoes == [AskField(campo="cep", motivo=None)]
+
+
+# --------------------------------------------------------------------------- pós-cotação com N (F8)
+def _cotados(*outcomes) -> LeadState:
+    """Estado em COTANDO com um resultado por carro."""
+    veiculos = []
+    for n, outcome in enumerate(outcomes):
+        motivo = "Veiculo com mais de 20 anos nao e aceito." if outcome is QuoteOutcome.RECUSA else None
+        veiculos.append(
+            VeiculoColetado(
+                texto=f"Carro {n}", ano=2019 + n,
+                quote_result=_result(outcome=outcome, motivo_recusa=motivo),
+            )
+        )
+    estado = _completo(stage=Stage.COTANDO, veiculos=veiculos)
+    estado.quote_result = veiculos[0].quote_result
+    return estado
+
+
+def test_dois_ok_viram_uma_apresentacao_so():
+    s, acoes = _act(_cotados(QuoteOutcome.OK, QuoteOutcome.OK), None)
+    assert len(acoes) == 1
+    assert isinstance(acoes[0], PresentMany)
+    assert len(acoes[0].resultados) == 2
+    assert s.stage is Stage.APRESENTADO
+
+
+def test_um_ok_e_um_recusado_ainda_apresenta():
+    s, acoes = _act(_cotados(QuoteOutcome.OK, QuoteOutcome.RECUSA), None)
+    assert isinstance(acoes[0], PresentMany)
+    assert s.stage is Stage.APRESENTADO
+
+
+def test_um_ok_e_um_indisponivel_ainda_apresenta():
+    _, acoes = _act(_cotados(QuoteOutcome.OK, QuoteOutcome.INDISPONIVEL), None)
+    assert isinstance(acoes[0], PresentMany)
+
+
+def test_nenhum_ok_com_indisponivel_vai_para_humano():
+    s, acoes = _act(_cotados(QuoteOutcome.RECUSA, QuoteOutcome.INDISPONIVEL), None)
+    assert isinstance(acoes[0], Handoff)
+    assert s.handoff_reason is HandoffReason.COTACAO_INDISPONIVEL
+
+
+def test_todos_recusados_encerra_com_recusa():
+    s, acoes = _act(_cotados(QuoteOutcome.RECUSA, QuoteOutcome.RECUSA), None)
+    assert isinstance(acoes[0], Refuse)
+    assert s.stage is Stage.ENCERRADO_RECUSA
+
+
+def test_um_carro_continua_no_present_de_sempre():
+    _, acoes = _act(_cotados(QuoteOutcome.OK), None)
+    assert isinstance(acoes[0], Present)
+
+
+def test_aceite_leva_a_lista_de_cotacoes_para_o_humano():
+    estado = _cotados(QuoteOutcome.OK, QuoteOutcome.OK)
+    estado.stage = Stage.APRESENTADO
+    s, acoes = _act(estado, _extr(intent=Intent.ACEITAR))
+
+    assert isinstance(acoes[0], Handoff)
+    payload = acoes[0].payload
+    assert [c["carro"] for c in payload["cotacoes"]] == ["Carro 0 2019", "Carro 1 2020"]
+    assert payload["cotacao"] is not None                      # o 1º carro continua onde estava
+    assert [v["texto"] for v in payload["dados"]["veiculos"]] == ["Carro 0", "Carro 1"]
+    assert s.handoff_reason is HandoffReason.LEAD_ACEITOU
+
+
+def test_troca_de_plano_recota_todos_os_carros():
+    estado = _cotados(QuoteOutcome.OK, QuoteOutcome.OK)
+    estado.stage = Stage.APRESENTADO
+    _, acoes = _act(estado, _extr(intent=Intent.ESCOLHER_PLANO, plano_id="premium"))
+    assert isinstance(acoes[0], DoQuotes)
+    assert len(acoes[0].requests) == 2
+    assert {r.plano_id for r in acoes[0].requests} == {"premium"}
 

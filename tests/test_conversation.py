@@ -19,7 +19,7 @@ from agent.models import (
     AskPlan,
     CepInfo,
     ConfirmCep,
-    DoQuote,
+    DoQuotes,
     Extraction,
     Handoff,
     HandoffReason,
@@ -28,9 +28,11 @@ from agent.models import (
     LeadState,
     Outbound,
     Present,
+    PresentMany,
     Refuse,
     SendText,
     Stage,
+    VeiculoColetado,
 )
 from agent.observability import ConversationLogger
 from agent.policy import next_action as next_action_real
@@ -109,42 +111,43 @@ async def falar(conv: Conversation, texto: str | None, n: int = 1, media: str = 
 
 # --------------------------------------------------------------------------- caminho feliz
 def passos_felizes():
-    """Roteiro da policy: idade → veículo → cep (+lookup) → plano → cotação → apresentação."""
+    """Roteiro da policy (ordem F8): idade → plano → veículo → cep (+lookup) → cotação."""
 
     def p1(s, e):
         s.idade = 35
+        s.stage = Stage.ESCOLHA_PLANO
+        return s, [AskPlan(planos=FakeRules().planos_resumo())]
+
+    def p2(s, e):
+        s.plano_id = "completo"
         s.stage = Stage.COLETA_VEICULO
         return s, [AskField(campo="veiculo")]
 
-    def p2(s, e):
+    def p3(s, e):
+        s.veiculos = [VeiculoColetado(texto="Onix", ano=2019)]
         s.veiculo_texto, s.veiculo_ano = "Onix", 2019
         s.stage = Stage.COLETA_CEP
         return s, [AskField(campo="cep")]
 
-    def p3(s, e):
+    def p4(s, e):
         s.cep = "01310100"
         s.stage = Stage.CONFIRMA_CEP
         return s, []
 
-    def p3b(s, e):
+    def p4b(s, e):
         assert s.cep_info is not None
         return s, [ConfirmCep(cep=s.cep, cidade=s.cep_info.cidade, uf=s.cep_info.uf)]
 
-    def p4(s, e):
-        s.cep_confirmado = True
-        s.stage = Stage.ESCOLHA_PLANO
-        return s, [AskPlan(planos=FakeRules().planos_resumo())]
-
     def p5(s, e):
-        s.plano_id = "completo"
+        s.cep_confirmado = True
         s.stage = Stage.COTANDO
-        return s, [DoQuote(request=quote_request())]
+        return s, [DoQuotes(requests=[quote_request()])]
 
     def p5b(s, e):
         s.stage = Stage.APRESENTADO
-        return s, [Present(result=s.quote_result)]
+        return s, [Present(result=s.veiculos[0].quote_result or s.quote_result)]
 
-    return [p1, p2, p3, p3b, p4, p5, p5b]
+    return [p1, p2, p3, p4, p4b, p5, p5b]
 
 
 @pytest.mark.asyncio
@@ -154,24 +157,24 @@ async def test_caminho_feliz_ate_present(tmp_path):
         passos_felizes(),
         extracoes=[
             Extraction(intent=Intent.FORNECER_DADOS, idade=35),
+            Extraction(intent=Intent.ESCOLHER_PLANO, plano_id="completo"),
             Extraction(intent=Intent.FORNECER_DADOS, veiculo_texto="Onix", veiculo_ano=2019),
             Extraction(intent=Intent.FORNECER_DADOS, cep="01310-100"),
             Extraction(intent=Intent.CONFIRMAR),
-            Extraction(intent=Intent.ESCOLHER_PLANO, plano_id="completo"),
         ],
         resultados=[quote_ok()],
     )
     _, s1 = await falar(conv, "oi, tenho 35 anos", 1)
-    _, s2 = await falar(conv, "Onix 2019", 2)
-    _, s3 = await falar(conv, "01310-100", 3)
-    _, s4 = await falar(conv, "sim", 4)
-    state, s5 = await falar(conv, "quero o completo", 5)
+    _, s2 = await falar(conv, "quero o completo", 2)
+    _, s3 = await falar(conv, "Onix 2019", 3)
+    _, s4 = await falar(conv, "01310-100", 4)
+    state, s5 = await falar(conv, "sim", 5)
 
-    assert [o.source for o in s1] == ["llm"] and "ano de fabricação" in s1[0].text
-    assert s2[0].source == "llm"
+    assert [o.source for o in s1] == ["template"] and "Essencial" in s1[0].text
+    assert s2[0].source == "llm"                            # pergunta do carro, pelo Responder
+    assert s3[0].source == "llm"                            # pergunta do CEP
     assert deps["lookup"].chamadas == ["01310100"]          # o CEP foi conferido no ViaCEP
-    assert "São Paulo/SP" in s3[0].text and s3[0].source == "template"
-    assert "Essencial" in s4[0].text
+    assert "São Paulo/SP" in s4[0].text and s4[0].source == "template"
     assert "R$ 209.90" in s5[0].text                        # preço só na renderização da Quote
     assert state.stage is Stage.APRESENTADO
     assert deps["quote_client"].pedidos[0].plano_id == "completo"
@@ -181,18 +184,19 @@ async def test_caminho_feliz_ate_present(tmp_path):
 async def test_estado_persiste_entre_turnos(tmp_path):
     conv, _ = montar(
         tmp_path,
-        passos_felizes()[:2],
-        extracoes=[Extraction(idade=35), Extraction(veiculo_ano=2019)],
+        passos_felizes()[:3],
+        extracoes=[Extraction(idade=35), Extraction(plano_id="completo"), Extraction(veiculo_ano=2019)],
     )
     await falar(conv, "35", 1)
-    state, _ = await falar(conv, "Onix 2019", 2)
-    assert state.idade == 35 and state.veiculo_ano == 2019
+    await falar(conv, "o completo", 2)
+    state, _ = await falar(conv, "Onix 2019", 3)
+    assert state.idade == 35 and state.plano_id == "completo" and state.veiculo_ano == 2019
 
 
 @pytest.mark.asyncio
 async def test_ask_field_registra_ultima_pergunta_e_passa_diretiva_ao_llm(tmp_path):
-    conv, deps = montar(tmp_path, passos_felizes()[:1], extracoes=[Extraction(idade=35)])
-    state, _ = await falar(conv, "tenho 35", 1)
+    conv, deps = montar(tmp_path, passos_felizes()[1:2], extracoes=[Extraction(plano_id="completo")])
+    state, _ = await falar(conv, "o completo", 1)
     assert state.ultima_pergunta == "veiculo"
     assert "ano de fabricação" in deps["responder"].chamadas[0][0]
 
@@ -202,7 +206,7 @@ async def test_ask_field_registra_ultima_pergunta_e_passa_diretiva_ao_llm(tmp_pa
 async def test_api_fora_do_ar_vira_handoff_sem_nenhum_preco(tmp_path):
     def p1(s, e):
         s.stage = Stage.COTANDO
-        return s, [DoQuote(request=quote_request())]
+        return s, [DoQuotes(requests=[quote_request()])]
 
     def p2(s, e):
         assert s.quote_result is not None and s.quote_result.outcome.value == "indisponivel"
@@ -230,7 +234,7 @@ async def test_api_fora_do_ar_vira_handoff_sem_nenhum_preco(tmp_path):
 @pytest.mark.asyncio
 async def test_cotacao_lenta_avisa_o_lead_antes_do_resultado(tmp_path):
     def p1(s, e):
-        return s, [DoQuote(request=quote_request())]
+        return s, [DoQuotes(requests=[quote_request()])]
 
     def p2(s, e):
         s.stage = Stage.APRESENTADO
@@ -245,7 +249,7 @@ async def test_cotacao_lenta_avisa_o_lead_antes_do_resultado(tmp_path):
 @pytest.mark.asyncio
 async def test_recusa_da_api_e_registrada_como_refusal(tmp_path):
     def p1(s, e):
-        return s, [DoQuote(request=quote_request(idade=80))]
+        return s, [DoQuotes(requests=[quote_request(idade=80)])]
 
     def p2(s, e):
         s.stage = Stage.ENCERRADO_RECUSA
@@ -302,7 +306,7 @@ async def test_acao_desconhecida_nao_deixa_o_lead_sem_resposta(tmp_path):
     """Ação não prevista é bug nosso: vira handoff, nunca silêncio."""
 
     def p1(s, e):
-        return s, [DoQuote(request=quote_request())]
+        return s, [DoQuotes(requests=[quote_request()])]
 
     conv, _ = montar(tmp_path, [p1], extracoes=[Extraction()], resultados=[])
     state, saidas = await falar(conv, "oi", 1)   # FakeQuoteClient sem resultado → IndexError
@@ -315,7 +319,7 @@ async def test_acao_desconhecida_nao_deixa_o_lead_sem_resposta(tmp_path):
 async def test_log_jsonl_tem_a_trilha_completa_do_turno(tmp_path):
     def p1(s, e):
         s.stage = Stage.COTANDO
-        return s, [DoQuote(request=quote_request())]
+        return s, [DoQuotes(requests=[quote_request()])]
 
     def p2(s, e):
         s.stage = Stage.APRESENTADO
@@ -338,7 +342,7 @@ async def test_log_jsonl_tem_a_trilha_completa_do_turno(tmp_path):
     assert all(e["quote_id"] == "q-down" for e in eventos if e["event"].startswith("quote_"))
     assert next(e for e in eventos if e["event"] == "extraction")["data"]["plano_id"] == "completo"
     decisao = next(e for e in eventos if e["event"] == "decision")
-    assert decisao["data"]["actions"] == ["do_quote"] and decisao["data"]["stage"] == "cotando"
+    assert decisao["data"]["actions"] == ["do_quotes"] and decisao["data"]["stage"] == "cotando"
     assert next(e for e in eventos if e["event"] == "llm_call")["data"]["papel"] == "extractor"
 
 
@@ -452,10 +456,10 @@ def _conversa_real(tmp_path: Path, respostas_quote: list[int]):
         extractor=FakeExtractor(
             [
                 Extraction(intent=Intent.FORNECER_DADOS, idade=35),
+                Extraction(intent=Intent.ESCOLHER_PLANO, plano_id="completo"),
                 Extraction(intent=Intent.FORNECER_DADOS, veiculo_texto="Onix", veiculo_ano=2019),
                 Extraction(intent=Intent.FORNECER_DADOS, cep="01310-100"),
                 Extraction(intent=Intent.CONFIRMAR),
-                Extraction(intent=Intent.ESCOLHER_PLANO, plano_id="completo"),
             ]
         ),
         responder=FakeResponder(),
@@ -474,15 +478,15 @@ def _conversa_real(tmp_path: Path, respostas_quote: list[int]):
 async def test_integracao_caminho_feliz_com_policy_presenter_e_cliente_reais(tmp_path):
     conv = _conversa_real(tmp_path, [503, 200])   # a API cai uma vez e o retry resolve
     _, s1 = await falar(conv, "oi, tenho 35 anos", 1)
-    _, s2 = await falar(conv, "é um Onix 2019", 2)
-    _, s3 = await falar(conv, "meu cep é 01310-100", 3)
-    _, s4 = await falar(conv, "sim, é isso", 4)
-    state, s5 = await falar(conv, "quero o completo", 5)
+    _, s2 = await falar(conv, "quero o completo", 2)
+    _, s3 = await falar(conv, "é um Onix 2019", 3)
+    _, s4 = await falar(conv, "meu cep é 01310-100", 4)
+    state, s5 = await falar(conv, "sim, é isso", 5)
 
-    assert "ano" in s1[0].text.lower()
-    assert s2[0].source == "llm"
-    assert "São Paulo" in s3[0].text                     # ViaCEP real (mockado no transporte)
-    assert "Essencial" in s4[0].text and "209,90" not in s4[0].text   # planos sem prêmio, só franquia
+    assert "Essencial" in s1[0].text and "209,90" not in s1[0].text   # planos sem prêmio, só franquia
+    assert s2[0].source == "llm" and "ano" in s2[0].text.lower()
+    assert s3[0].source == "llm"
+    assert "São Paulo" in s4[0].text                     # ViaCEP real (mockado no transporte)
     assert state.stage is Stage.APRESENTADO
     assert "R$ 209,90" in s5[-1].text                    # único preço da conversa, vindo da API
 
@@ -499,7 +503,7 @@ async def test_integracao_caminho_feliz_com_policy_presenter_e_cliente_reais(tmp
 async def test_integracao_api_fora_do_ar_escala_sem_inventar_preco(tmp_path):
     conv = _conversa_real(tmp_path, [503, 502, 500, 503])
     todas: list[Outbound] = []
-    for n, texto in enumerate(["tenho 35", "Onix 2019", "01310-100", "sim", "o completo"], start=1):
+    for n, texto in enumerate(["tenho 35", "o completo", "Onix 2019", "01310-100", "sim"], start=1):
         state, saidas = await falar(conv, texto, n)
         todas.extend(saidas)
 
@@ -583,7 +587,7 @@ async def test_texto_lento_vem_do_slot_ativo(tmp_path, monkeypatch):
     loja.add_version("conversation.texto_lento", "v2", "Aguenta aí que estou consultando.")
 
     def p1(s, e):
-        return s, [DoQuote(request=quote_request())]
+        return s, [DoQuotes(requests=[quote_request()])]
 
     def p2(s, e):
         s.stage = Stage.APRESENTADO
@@ -689,8 +693,63 @@ async def test_turno_de_consulta_ponta_a_ponta_com_a_policy_real(tmp_path, monke
 
     assert state.idade == 35                       # o campo da mesma mensagem foi aplicado
     assert state.stage is Stage.INICIO             # a etapa não andou por causa da dúvida
-    assert state.ultima_pergunta == "veiculo"      # mas a próxima pergunta foi feita
+    assert state.ultima_pergunta == "plano"        # mas a próxima pergunta foi feita (ordem F8)
     assert saidas[0].text == "Sua apólice está ativa. Qual o ano do carro?"
     decisao = next(e for e in logger.eventos() if e["event"] == "decision")
     assert decisao["data"]["actions"] == ["answer_with_tools"]
+
+
+# --------------------------------------------------------------------------- vários carros (F8)
+@pytest.mark.asyncio
+async def test_dois_carros_cotam_em_paralelo_e_saem_numa_mensagem_so(tmp_path):
+    """Duas chamadas à API, um resultado por carro no estado, UMA mensagem para o lead."""
+
+    def p1(s, e):
+        s.veiculos = [
+            VeiculoColetado(texto="Onix 2022", ano=2022),
+            VeiculoColetado(texto="HB20 2020", ano=2020),
+        ]
+        s.stage = Stage.COTANDO
+        return s, [DoQuotes(requests=[quote_request(veiculo_ano=2022), quote_request(veiculo_ano=2020)])]
+
+    def p2(s, e):
+        s.stage = Stage.APRESENTADO
+        return s, [PresentMany(resultados=s.veiculos)]
+
+    conv, deps = montar(
+        tmp_path, [p1, p2], extracoes=[Extraction()], resultados=[quote_ok(), quote_ok(idade=40)]
+    )
+    state, saidas = await falar(conv, "quero cotar os dois", 1)
+
+    assert [r.veiculo_ano for r in deps["quote_client"].pedidos] == [2022, 2020]
+    assert [v.quote_result.request.idade for v in state.veiculos] == [35, 40]   # cada carro com o seu
+    assert state.quote_result is state.veiculos[0].quote_result                 # espelho do primeiro
+    assert len(saidas) == 1                                                     # uma mensagem só
+
+    eventos = deps["logger"].eventos()
+    assert [e["event"] for e in eventos].count("quote_result") == 2
+    assert [e["data"]["veiculo"] for e in eventos if e["event"] == "quote_result"] == [
+        "Onix 2022", "HB20 2020",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_aviso_de_cotacao_lenta_sai_uma_vez_so_com_dois_carros(tmp_path):
+    def p1(s, e):
+        s.veiculos = [VeiculoColetado(texto="Onix", ano=2022), VeiculoColetado(texto="HB20", ano=2020)]
+        s.stage = Stage.COTANDO
+        return s, [DoQuotes(requests=[quote_request(), quote_request()])]
+
+    def p2(s, e):
+        s.stage = Stage.APRESENTADO
+        return s, [PresentMany(resultados=s.veiculos)]
+
+    conv, _ = montar(
+        tmp_path, [p1, p2], extracoes=[Extraction()],
+        resultados=[quote_ok(), quote_ok()], lento=True,
+    )
+    _, saidas = await falar(conv, "vamos lá", 1)
+
+    lentos = [o for o in saidas if o.text == TEXTO_LENTO]
+    assert len(lentos) == 1
 

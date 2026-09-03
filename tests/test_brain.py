@@ -29,7 +29,7 @@ from agent.brain import (
     guard_price,
     resumo_state,
 )
-from agent.models import CepInfo, Extraction, Intent, LeadState, Stage
+from agent.models import CepInfo, Extraction, Intent, LeadState, Stage, VeiculoColetado
 from agent.runtime_config import ConfigStore
 from tests.fakes import (
     ERRO_400,
@@ -504,3 +504,51 @@ def test_trace_que_explode_nao_derruba_o_turno():
     import asyncio
 
     assert asyncio.run(ex.extract("40", _state(), HOJE)).idade == 40
+
+
+# --------------------------------------------------------------------------- vários carros (F8)
+def _carros(*pares) -> list[VeiculoColetado]:
+    return [VeiculoColetado(texto=t, ano=a) for t, a in pares]
+
+
+def test_resumo_state_com_um_carro_e_o_texto_entregue():
+    """1 carro = exatamente o resumo de sempre (o golden `brain_resumo_state` prova o byte)."""
+    state = _state(idade=35, veiculo_texto="Onix", veiculo_ano=2019, veiculos=_carros(("Onix", 2019)))
+    assert "carro: Onix (ano 2019)" in resumo_state(state)
+    assert "carros:" not in resumo_state(state)
+
+
+def test_resumo_state_com_dois_carros_lista_os_dois():
+    state = _state(
+        idade=35, veiculo_texto="Onix 2022", veiculo_ano=2022,
+        veiculos=_carros(("Onix 2022", 2022), ("HB20", 2020)),
+    )
+    resumo = resumo_state(state)
+    assert "carros: Onix 2022; HB20 2020" in resumo
+    assert "carro: " not in resumo
+
+
+def test_guard_price_libera_quando_algum_carro_cotou():
+    """Com 2 carros, basta uma cotação OK para o valor já ser público."""
+    veiculos = _carros(("Onix", 2019), ("HB20", 2020))
+    veiculos[0].quote_result = quote_indisponivel()
+    veiculos[1].quote_result = quote_ok()
+    state = _state(ultima_pergunta="plano", veiculos=veiculos)
+
+    texto = "O Onix eu te mando em seguida; o HB20 ficou em R$ 209,90."
+    assert guard_price(texto, state) == texto
+
+
+def test_guard_price_dispara_quando_nenhum_carro_cotou():
+    veiculos = _carros(("Onix", 2019), ("HB20", 2020))
+    veiculos[0].quote_result = quote_indisponivel()
+    state = _state(ultima_pergunta="idade", veiculos=veiculos)
+    assert guard_price("deve dar uns R$ 300 cada", state) == fallback_text("idade")
+
+
+def test_prompt_do_extractor_pede_a_lista_de_carros():
+    prompt = build_extraction_instructions(_state(), HOJE)
+    assert "veiculos: UM item por carro citado" in prompt
+    assert "não junte tudo" in prompt
+    assert "repita o PRIMEIRO item de veiculos" in prompt     # compatibilidade com 1 carro
+

@@ -146,6 +146,19 @@ SLOTS: dict[str, dict] = {
         'label': 'Policy: DIRETIVA_MESMO_PLANO', 'grupo': 'policy', 'placeholders': [],
         'default': 'lead repetiu o plano que já está cotado; confirme se quer fechar esse mesmo ou ver outro; NÃO cite valores novos',
     },
+    'policy.txt_max_veiculos': {
+        'label': 'Policy: teto de carros por cotação', 'grupo': 'policy', 'placeholders': ['max'],
+        'default': 'Consigo cotar até {max} carros por conversa. Vou seguir com os primeiros; '
+                   'os outros a gente vê depois, tudo bem?',
+    },
+    'policy.diretiva_multiplos': {
+        'label': 'Policy: contexto de vários carros', 'grupo': 'policy', 'placeholders': ['carros'],
+        'default': 'o lead quer cotar mais de um carro ({carros}); deixe claro que você vai cotar todos',
+    },
+    'policy.motivo_ano_carro': {
+        'label': 'Policy: falta o ano de um carro', 'grupo': 'policy', 'placeholders': ['carro'],
+        'default': 'falta o ano de fabricação do {carro}',
+    },
     'policy.motivo_ano_modelo': {
         'label': 'Policy: MOTIVO_ANO_MODELO', 'grupo': 'policy', 'placeholders': [],
         'default': 'ano futuro parece ano-modelo; confirmar ano de fabricação',
@@ -229,6 +242,27 @@ SLOTS: dict[str, dict] = {
         'label': 'Cotação: chamada para ação', 'grupo': 'presenter', 'placeholders': [],
         'default': 'Quer fechar? Um consultor finaliza com você. Ou prefere ver outro plano?',
     },
+    'presenter.present.cta_plano_assumido': {
+        'label': 'Cotação: chamada para ação (plano assumido)', 'grupo': 'presenter',
+        'placeholders': ['plano_nome'],
+        'default': 'Cotei no {plano_nome}, que é o de entrada. Quer fechar, ou prefere ver o Completo ou o Premium?',
+    },
+    'presenter.present_many.cabecalho': {
+        'label': 'Cotação múltipla: cabeçalho', 'grupo': 'presenter', 'placeholders': ['n', 'plano_nome'],
+        'default': 'Cotei os {n} carros no plano *{plano_nome}*:',
+    },
+    'presenter.present_many.titulo_carro': {
+        'label': 'Cotação múltipla: título de cada carro', 'grupo': 'presenter', 'placeholders': ['carro'],
+        'default': '*{carro}*',
+    },
+    'presenter.present_many.linha_recusa': {
+        'label': 'Cotação múltipla: carro recusado', 'grupo': 'presenter', 'placeholders': ['carro', 'motivo'],
+        'default': '*{carro}*: não consigo cotar — {motivo}',
+    },
+    'presenter.present_many.linha_pendente': {
+        'label': 'Cotação múltipla: carro sem resposta da API', 'grupo': 'presenter', 'placeholders': ['carro'],
+        'default': '*{carro}*: o sistema não respondeu agora; esse eu te mando em seguida.',
+    },
     'presenter.refuse': {
         'label': 'Recusa: explicação', 'grupo': 'presenter', 'placeholders': ['motivo'],
         'default': 'Vou ser sincero com você: não temos um plano que se encaixe no seu perfil. O motivo é que {motivo}',
@@ -273,6 +307,10 @@ SLOTS: dict[str, dict] = {
         'label': "Conversation: 'só um instante'", 'grupo': 'conversation', 'placeholders': [],
         'default': 'Só um instante, estou consultando o sistema...',
     },
+    'brain.resumo_carros': {
+        'label': 'Resumo do estado: vários carros', 'grupo': 'extractor', 'placeholders': ['carros'],
+        'default': 'carros: {carros}',
+    },
     'extractor.instructions': {
         'label': 'Prompt do Extractor (system)', 'grupo': 'extractor',
         'placeholders': ['today', 'ano', 'resumo', 'ultima', 'intents'],
@@ -287,8 +325,12 @@ Já coletado até aqui: {resumo}.
 Regras:
 - Extraia SÓ o que a mensagem ATUAL diz. O que já estava coletado não se repete: campo não citado agora = null.
 - idade: número inteiro de anos do condutor. Não confunda com ano do carro.
-- veiculo_texto: como o lead falou ("Onix 2019", "gol quadrado"). veiculo_ano: o ano citado.
-- ano_parece_modelo = true quando veiculo_ano for maior que {ano} (provável ano-modelo, não de fabricação).
+- veiculos: UM item por carro citado na mensagem, na ordem em que aparecem — texto (como o lead falou:
+  "Onix 2022", "gol quadrado"), ano (o ano de fabricação citado) e ano_parece_modelo. O lead pode pedir
+  mais de um carro de uma vez ("quero cotar dois carros: um Onix 2022 e um HB20 2020") — não junte tudo
+  num item só. Carro citado sem ano entra na lista com ano null.
+- veiculo_texto, veiculo_ano e ano_parece_modelo: repita o PRIMEIRO item de veiculos (compatibilidade).
+- ano_parece_modelo = true quando o ano for maior que {ano} (provável ano-modelo, não de fabricação).
 - cep: copie como o lead escreveu, sem limpar.
 - plano_id: só se ele nomear um plano (essencial, completo, premium).
 - data_inicio: resolva datas relativas para uma data real usando hoje = {today}

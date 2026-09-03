@@ -28,6 +28,7 @@ Assinaturas esperadas (implementadas nos módulos indicados):
                      today: date) -> tuple[LeadState, list[Action]]   # função pura
 
   presenter.render(action: Action, state: LeadState) -> str           # só ações de template
+      (Present e PresentMany renderizam cotação; DoQuotes é do quote_client, não do presenter)
 
   pii.mask_text(texto: str) -> str
   pii.mask_obj(obj: Any) -> Any                                        # recursivo em dict/list/str
@@ -72,11 +73,21 @@ class Intent(StrEnum):
     OUTRO = "outro"
 
 
+class VeiculoExtraido(BaseModel):
+    """Um carro citado na mensagem. O lead pode cotar mais de um de uma vez."""
+
+    texto: str | None = None              # como o lead falou ("Onix 2022")
+    ano: int | None = None
+    ano_parece_modelo: bool = False       # ano > ano corrente → provável ano-modelo
+
+
 class Extraction(BaseModel):
     """Saída estruturada do Extractor. Só o que a mensagem ATUAL diz; None = não citado."""
 
     intent: Intent = Intent.OUTRO
     idade: int | None = None
+    veiculos: list[VeiculoExtraido] = Field(default_factory=list)   # TODOS os carros da mensagem
+    # Compatibilidade: sempre o PRIMEIRO carro de `veiculos` (o Extractor preenche os dois).
     veiculo_texto: str | None = None      # como o lead falou ("Onix 2019")
     veiculo_ano: int | None = None
     ano_parece_modelo: bool = False       # ano > ano corrente → provável ano-modelo
@@ -194,11 +205,31 @@ class HandoffReason(StrEnum):
     SEM_PROGRESSO = "sem_progresso"               # N turnos sem avançar a coleta
 
 
+class VeiculoColetado(BaseModel):
+    """Um carro do lead e a cotação dele. Fonte da verdade de `LeadState.veiculos`."""
+
+    texto: str | None = None
+    ano: int | None = None
+    quote_result: QuoteResult | None = None
+
+    def rotulo(self) -> str:
+        """Como o carro é citado nos textos: as palavras do próprio lead, com o ano se faltar."""
+        texto = (self.texto or "").strip()
+        if not texto:
+            return f"carro {self.ano}" if self.ano else "carro"
+        if self.ano and str(self.ano) not in texto:
+            return f"{texto} {self.ano}"
+        return texto
+
+
 class LeadState(BaseModel):
     conversation_id: str
     stage: Stage = Stage.INICIO
     lead_nome: str | None = None
     idade: int | None = None
+    veiculos: list[VeiculoColetado] = Field(default_factory=list)   # fonte da verdade
+    # Espelho de `veiculos[0]` (sincronizado só em `policy._absorver`): mantém 1 carro idêntico
+    # ao entregue para quem lê o estado de fora (resumo do prompt, handoff, Lab).
     veiculo_texto: str | None = None
     veiculo_ano: int | None = None
     cep: str | None = None                # 8 dígitos
@@ -207,8 +238,9 @@ class LeadState(BaseModel):
     cep_tentativas: int = 0
     cep_ausente: bool = False             # lead não sabe → cota sem CEP, avisar "pode subir"
     plano_id: PlanoId | None = None
+    plano_assumido: bool = False          # o lead não escolheu; a policy assumiu o padrão
     data_inicio: date | None = None       # None → hoje na hora de cotar
-    quote_result: QuoteResult | None = None
+    quote_result: QuoteResult | None = None   # espelho de `veiculos[0].quote_result`
     handoff_reason: HandoffReason | None = None
     turnos: int = 0
     turnos_sem_progresso: int = 0
@@ -236,14 +268,24 @@ class AskPlan(BaseModel):
     planos: list[PlanoResumo]
 
 
-class DoQuote(BaseModel):
-    kind: Literal["do_quote"] = "do_quote"
-    request: QuoteRequest
+class DoQuotes(BaseModel):
+    """Uma cotação por carro, mesmo plano. Com 1 carro é a lista de um elemento."""
+
+    kind: Literal["do_quotes"] = "do_quotes"
+    requests: list[QuoteRequest]
 
 
 class Present(BaseModel):
     kind: Literal["present"] = "present"
     result: QuoteResult                   # outcome == OK
+    cep_ausente: bool = False
+
+
+class PresentMany(BaseModel):
+    """Apresentação de 2+ carros numa mensagem só: um bloco por carro e UM fechamento."""
+
+    kind: Literal["present_many"] = "present_many"
+    resultados: list[VeiculoColetado]     # na ordem em que o lead citou; cada um com sua cotação
     cep_ausente: bool = False
 
 
@@ -284,7 +326,8 @@ class AnswerWithTools(BaseModel):
 
 
 Action = Annotated[
-    AskField | ConfirmCep | AskPlan | DoQuote | Present | Refuse | Handoff | Reply | SendText | AnswerWithTools,
+    AskField | ConfirmCep | AskPlan | DoQuotes | Present | PresentMany | Refuse | Handoff | Reply
+    | SendText | AnswerWithTools,
     Field(discriminator="kind"),
 ]
 

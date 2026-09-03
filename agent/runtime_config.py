@@ -94,6 +94,8 @@ class PolicyTools(BaseModel):
     max_turnos_sem_progresso: int | None = Field(None, ge=1)
     max_cep_tentativas: int | None = Field(None, ge=0)
     objecoes_ate_handoff: int | None = Field(None, ge=1)
+    plano_padrao: str | None = None            # assumido quando o lead não escolhe
+    max_veiculos: int | None = Field(None, ge=1, le=5)
 
 
 class RulesTools(BaseModel):
@@ -276,6 +278,8 @@ def _code_defaults() -> dict[str, dict[str, Any]]:
                 "max_turnos_sem_progresso": settings.max_turnos_sem_progresso,
                 "max_cep_tentativas": settings.max_cep_tentativas,
                 "objecoes_ate_handoff": 2,
+                "plano_padrao": "essencial",
+                "max_veiculos": 3,
             },
             "rules": {"pre_validacao_local": True},
         },

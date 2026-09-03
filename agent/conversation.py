@@ -11,6 +11,7 @@ os módulos irmãos ficam prontos.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -237,7 +238,9 @@ class Conversation:
 
     # ------------------------------------------------------------------ ações
     async def _executar(self, state: LeadState, action: Action, turno: _Turno, rodada: int) -> LeadState:
-        if action.kind in ("send_text", "confirm_cep", "ask_plan", "present", "refuse", "handoff"):
+        if action.kind in (
+            "send_text", "confirm_cep", "ask_plan", "present", "present_many", "refuse", "handoff",
+        ):
             if action.kind == "refuse":
                 turno.logger.event("refusal", message_id=turno.inbound.message_id, motivo=action.motivo)
             if action.kind == "handoff":
@@ -271,7 +274,7 @@ class Conversation:
             await self._enviar(texto, "llm", turno)
             return state
 
-        if action.kind == "do_quote":
+        if action.kind == "do_quotes":
             return await self._cotar(state, action, turno, rodada)
 
         raise ValueError(f"ação desconhecida: {action.kind}")
@@ -287,28 +290,49 @@ class Conversation:
             turno.logger.event("tool_call", message_id=turno.inbound.message_id, **evento)
 
     async def _cotar(self, state: LeadState, action: Any, turno: _Turno, rodada: int) -> LeadState:
+        """Uma chamada por carro, em paralelo, e UMA redecisão com todos os resultados.
+
+        Em paralelo porque a API é lenta de propósito: dois carros em série dobrariam a espera
+        do lead. O aviso de "só um instante" sai no máximo uma vez, por mais carros que sejam.
+        """
+        avisado = False
+
         async def on_slow() -> None:
+            nonlocal avisado
+            if avisado:
+                return
+            avisado = True
             texto = config_store.text("conversation.texto_lento")
             await self._enviar(self._render(SendText(text=texto), state), "template", turno)
 
-        result = await self.quote_client.quote(action.request, on_slow)
-        for attempt in result.attempts:
+        resultados = await asyncio.gather(
+            *(self.quote_client.quote(req, on_slow) for req in action.requests)
+        )
+        for indice, result in enumerate(resultados):
+            veiculo = state.veiculos[indice] if indice < len(state.veiculos) else None
+            for attempt in result.attempts:
+                turno.logger.event(
+                    "quote_attempt",
+                    message_id=turno.inbound.message_id,
+                    quote_id=result.quote_id,
+                    **attempt.model_dump(mode="json"),
+                )
             turno.logger.event(
-                "quote_attempt",
+                "quote_result",
                 message_id=turno.inbound.message_id,
                 quote_id=result.quote_id,
-                **attempt.model_dump(mode="json"),
+                outcome=result.outcome.value,
+                motivo_recusa=result.motivo_recusa,
+                erro=result.erro,
+                total_ms=result.total_ms,
+                veiculo=veiculo.rotulo() if veiculo is not None else None,
             )
-        turno.logger.event(
-            "quote_result",
-            message_id=turno.inbound.message_id,
-            quote_id=result.quote_id,
-            outcome=result.outcome.value,
-            motivo_recusa=result.motivo_recusa,
-            erro=result.erro,
-            total_ms=result.total_ms,
+            if veiculo is not None:
+                veiculo.quote_result = result
+        # Espelho de 1 carro (`quote_result`) para quem lê o estado de fora.
+        state.quote_result = state.veiculos[0].quote_result if state.veiculos else (
+            resultados[0] if resultados else None
         )
-        state.quote_result = result
         if rodada >= MAX_RODADAS:
             return state
         return await self._decidir_e_executar(state, None, turno, rodada + 1)

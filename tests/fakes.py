@@ -88,6 +88,15 @@ def render_fake(action: Action, state: LeadState) -> str:
         quote = action.result.quote
         assert quote is not None
         return f"Plano {quote.plano_nome}: R$ {quote.premio_mensal:.2f}/mês."
+    if action.kind == "present_many":
+        linhas = []
+        for veiculo in action.resultados:
+            resultado = veiculo.quote_result
+            if resultado is not None and resultado.quote is not None:
+                linhas.append(f"{veiculo.rotulo()}: R$ {resultado.quote.premio_mensal:.2f}/mês.")
+            else:
+                linhas.append(f"{veiculo.rotulo()}: sem cotação.")
+        return " ".join(linhas)
     if action.kind == "refuse":
         return f"Não consigo seguir: {action.motivo}"
     if action.kind == "handoff":

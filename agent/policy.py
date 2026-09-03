@@ -5,6 +5,15 @@ lista de ações. Sem I/O e sem LLM, porque decisão de venda (cotar, recusar,
 escalar) precisa ser determinística, testável e auditável; o LLM só extrai
 dados e transforma `AskField`/`Reply` em texto.
 
+O lead pode cotar VÁRIOS carros de uma vez: `LeadState.veiculos` é a fonte da
+verdade e `veiculo_texto/veiculo_ano/quote_result` são espelho de `veiculos[0]`,
+sincronizado num ponto só (`_absorver`). Uma cotação por carro, mesmo plano
+(`DoQuotes`), e uma resposta com todos (`PresentMany`).
+
+O plano é perguntado UMA vez: se a resposta seguinte não trouxer a escolha, a
+policy assume `tools.policy.plano_padrao` e marca `plano_assumido` — a troca
+depois recota todos os carros.
+
 `Intent.CONSULTA` só chega aqui quando existe tool habilitada no painel — a
 `Conversation` normaliza para `outro` quando não existe. A policy então devolve
 `AnswerWithTools`: responde a pergunta com a ferramenta e retoma a coleta de onde
@@ -33,19 +42,22 @@ from agent.models import (
     AskPlan,
     CampoColeta,
     ConfirmCep,
-    DoQuote,
+    DoQuotes,
     Extraction,
     Handoff,
     HandoffReason,
     Intent,
     LeadState,
     Present,
+    PresentMany,
     QuoteOutcome,
     QuoteRequest,
     Refuse,
     Reply,
     SendText,
     Stage,
+    VeiculoColetado,
+    VeiculoExtraido,
 )
 from agent.runtime_config import store
 
@@ -132,10 +144,14 @@ def next_action(
 ) -> tuple[LeadState, list[Action]]:
     """Decide o próximo passo. Não muta `state`: devolve uma cópia."""
     s = state.model_copy(deep=True)
+    _migrar_veiculos(s)
+    # Lido ANTES de absorver (a absorção pode trocar `ultima_pergunta` numa pendência):
+    # é o que diz se a pergunta do plano já foi feita e ficou sem resposta.
+    perguntou_plano = state.ultima_pergunta == "plano"
 
     # Re-entradas do conversation (não são turno novo do lead).
     if extraction is None:
-        if s.stage is Stage.COTANDO and s.quote_result is not None:
+        if s.stage is Stage.COTANDO and _veiculos_cotados(s):
             return _pos_cotacao(s)
         if s.stage is Stage.CONFIRMA_CEP and s.cep_info is not None and not s.cep_confirmado:
             acoes = _resolver_cep(s)
@@ -173,6 +189,12 @@ def next_action(
         return s, [abs_.refuse]
 
     progresso = abs_.campos_alterados or intent in INTENTS_UTEIS
+
+    # Plano perguntado UMA vez: qualquer resposta que não traga a escolha (inclusive "tanto
+    # faz", ou o lead adiantando outro campo) faz a policy assumir o padrão e seguir.
+    if s.plano_id is None and perguntou_plano and _campo_faltante(s) == "plano":
+        progresso = _assumir_plano(s, rules) or progresso
+
     s, escalou = _atualizar_estagnacao(s, progresso)
     if escalou is not None:
         return s, escalou
@@ -237,24 +259,8 @@ def _absorver(s: LeadState, e: Extraction, rules: Rules, today: date) -> _Absorc
         out.campos_alterados = out.campos_alterados or s.idade != e.idade
         s.idade = e.idade
 
-    if e.veiculo_ano is not None:
-        if e.ano_parece_modelo or e.veiculo_ano > today.year:
-            # Não grava: 2027 quase sempre é ano-modelo, e ano errado vira preço errado.
-            s.stage = Stage.COLETA_VEICULO
-            s.ultima_pergunta = "veiculo"
-            out.pendencias.append(AskField(campo="veiculo", motivo=_t("policy.motivo_ano_modelo")))
-        else:
-            violacao = rules.validate_veiculo_ano(e.veiculo_ano) if pre_validacao else None
-            if violacao is not None:
-                out.refuse = Refuse(motivo=violacao.motivo)
-                return out
-            out.campos_alterados = out.campos_alterados or s.veiculo_ano != e.veiculo_ano
-            s.veiculo_ano = e.veiculo_ano
-            if e.veiculo_texto:
-                s.veiculo_texto = e.veiculo_texto
-    elif e.veiculo_texto:
-        out.campos_alterados = out.campos_alterados or s.veiculo_texto != e.veiculo_texto
-        s.veiculo_texto = e.veiculo_texto
+    if _absorver_veiculos(s, e, rules, today, out, pre_validacao) is not None:
+        return out
 
     if e.cep is not None:
         cep8 = rules.normalize_cep(e.cep)
@@ -301,6 +307,7 @@ def _absorver(s: LeadState, e: Extraction, rules: Rules, today: date) -> _Absorc
     if e.plano_id is not None:
         out.campos_alterados = out.campos_alterados or s.plano_id != e.plano_id
         s.plano_id = e.plano_id
+        s.plano_assumido = False   # escolha do lead vence o padrão assumido antes
 
     if e.data_inicio is not None and not e.data_vaga:
         violacao = rules.validate_data_inicio(e.data_inicio) if pre_validacao else None
@@ -311,6 +318,125 @@ def _absorver(s: LeadState, e: Extraction, rules: Rules, today: date) -> _Absorc
             s.data_inicio = e.data_inicio
 
     return out
+
+
+# --------------------------------------------------------------------------- veículos
+def _veiculos_da_extracao(e: Extraction) -> list[VeiculoExtraido]:
+    """Carros citados na mensagem. Sem a lista, os campos escalares valem como um carro."""
+    if e.veiculos:
+        return e.veiculos
+    if e.veiculo_texto is not None or e.veiculo_ano is not None:
+        return [VeiculoExtraido(texto=e.veiculo_texto, ano=e.veiculo_ano, ano_parece_modelo=e.ano_parece_modelo)]
+    return []
+
+
+def _casar_veiculo(coletados: list[VeiculoColetado], novo: VeiculoExtraido) -> int | None:
+    """Índice do carro que o lead está completando/corrigindo; `None` = é um carro novo.
+
+    Casa pelo texto ("o HB20 é 2020" volta no HB20); um ano solto completa o primeiro carro
+    sem ano, ou corrige o único carro da conversa — nunca inventa um carro sem nome.
+    """
+    if novo.texto:
+        alvo = novo.texto.strip().lower()
+        for i, v in enumerate(coletados):
+            atual = (v.texto or "").strip().lower()
+            if atual and (alvo in atual or atual in alvo):
+                return i
+        return None
+    if novo.ano is None:
+        return None
+    for i, v in enumerate(coletados):
+        if v.ano is None:
+            return i
+    return 0 if len(coletados) == 1 else None
+
+
+def _absorver_veiculos(
+    s: LeadState, e: Extraction, rules: Rules, today: date, out: _Absorcao, pre_validacao: bool
+) -> Refuse | None:
+    """Funde os carros da mensagem em `s.veiculos` e sincroniza o espelho de 1 carro.
+
+    Devolve a recusa (e para tudo) quando um carro fere a regra de aceitação; ano suspeito de
+    ano-modelo vira pendência, como no fluxo entregue.
+    """
+    novos = _veiculos_da_extracao(e)
+    if not novos:
+        return None
+    teto = int(_p("tools.policy.max_veiculos"))
+
+    for novo in novos:
+        ano = novo.ano
+        if ano is not None and (novo.ano_parece_modelo or ano > today.year):
+            # Não grava: 2027 quase sempre é ano-modelo, e ano errado vira preço errado.
+            s.stage = Stage.COLETA_VEICULO
+            s.ultima_pergunta = "veiculo"
+            out.pendencias.append(AskField(campo="veiculo", motivo=_t("policy.motivo_ano_modelo")))
+            ano = None
+        elif ano is not None and pre_validacao:
+            violacao = rules.validate_veiculo_ano(ano)
+            if violacao is not None:
+                out.refuse = Refuse(motivo=violacao.motivo)
+                return out.refuse
+
+        indice = _casar_veiculo(s.veiculos, novo)
+        if indice is None:
+            if len(s.veiculos) >= teto:
+                out.avisos.append(SendText(text=_t_ctx("policy.txt_max_veiculos", max=teto)))
+                continue
+            if novo.texto is None and ano is None:
+                continue
+            s.veiculos.append(VeiculoColetado(texto=novo.texto, ano=ano))
+            out.campos_alterados = True
+            continue
+
+        alvo = s.veiculos[indice]
+        if novo.texto and novo.texto != alvo.texto:
+            alvo.texto = novo.texto
+            out.campos_alterados = True
+        if ano is not None and ano != alvo.ano:
+            alvo.ano = ano
+            out.campos_alterados = True
+
+    _sincronizar_veiculo(s)
+    return None
+
+
+def _migrar_veiculos(s: LeadState) -> None:
+    """Estado que só tem os campos escalares (conversa antiga, teste, store externo) vira lista.
+
+    Depois daqui o resto da policy lê SÓ `s.veiculos` — um caminho, não dois.
+    """
+    if s.veiculos or (s.veiculo_texto is None and s.veiculo_ano is None):
+        return
+    s.veiculos = [VeiculoColetado(texto=s.veiculo_texto, ano=s.veiculo_ano, quote_result=s.quote_result)]
+
+
+def _sincronizar_veiculo(s: LeadState) -> None:
+    """ÚNICO ponto de espelho: `veiculo_texto/veiculo_ano` são sempre o primeiro carro."""
+    primeiro = s.veiculos[0] if s.veiculos else None
+    s.veiculo_texto = primeiro.texto if primeiro else None
+    s.veiculo_ano = primeiro.ano if primeiro else None
+
+
+def _rotulos(s: LeadState) -> str:
+    return "; ".join(v.rotulo() for v in s.veiculos)
+
+
+def _veiculos_cotados(s: LeadState) -> list[VeiculoColetado]:
+    """Carros que já têm cotação (a migração garante que a lista existe)."""
+    return [v for v in s.veiculos if v.quote_result is not None]
+
+
+# --------------------------------------------------------------------------- plano
+def _assumir_plano(s: LeadState, rules: Rules) -> bool:
+    """Assume o plano padrão em vez de repetir a pergunta. Padrão inválido cai no 1º da API."""
+    ids = [p.id for p in rules.planos_resumo()]
+    padrao = str(_p("tools.policy.plano_padrao"))
+    if padrao not in ids:
+        padrao = ids[0]
+    s.plano_id = padrao  # type: ignore[assignment]  # validado contra os ids do /planos
+    s.plano_assumido = True
+    return True
 
 
 # --------------------------------------------------------------------------- CEP
@@ -337,55 +463,88 @@ def _resolver_cep(s: LeadState) -> list[Action] | None:
 
 # --------------------------------------------------------------------------- fluxo de coleta
 def _campo_faltante(s: LeadState) -> CampoColeta | None:
-    """Ordem de coleta: idade → veículo → CEP → plano."""
+    """Ordem de coleta: idade → plano → veículo(s) → CEP.
+
+    O plano vem cedo porque ele vale para TODOS os carros do lead: saber o plano antes de
+    saber quantos carros são é o que permite cotar todos de uma vez.
+    """
     if s.idade is None:
         return "idade"
-    if s.veiculo_ano is None:
+    if s.plano_id is None:
+        return "plano"
+    if not s.veiculos or any(v.ano is None for v in s.veiculos):
         return "veiculo"
     if s.cep is None and not s.cep_ausente:
         return "cep"
-    if s.plano_id is None:
-        return "plano"
+    return None
+
+
+def _contexto_da_pergunta(s: LeadState, campo: CampoColeta) -> str | None:
+    """Contexto para o Responder: qual carro falta, ou que a cotação é de vários carros."""
+    if campo == "veiculo":
+        sem_ano = next((v for v in s.veiculos if v.ano is None), None)
+        if sem_ano is not None and len(s.veiculos) > 1:
+            return _t_ctx("policy.motivo_ano_carro", carro=sem_ano.rotulo())
+        return None
+    if len(s.veiculos) > 1:
+        return _t_ctx("policy.diretiva_multiplos", carros=_rotulos(s))
     return None
 
 
 def _fluxo(s: LeadState, rules: Rules, today: date) -> list[Action]:
-    """Pergunta o próximo campo faltante ou dispara a cotação."""
+    """Pergunta o próximo campo faltante ou dispara a cotação de TODOS os carros."""
     campo = _campo_faltante(s)
     if campo is not None:
         s.stage = _STAGE_DO_CAMPO[campo]
         s.ultima_pergunta = campo
         if campo == "plano":
             return [AskPlan(planos=rules.planos_resumo())]
-        return [AskField(campo=campo)]
+        return [AskField(campo=campo, motivo=_contexto_da_pergunta(s, campo))]
 
     s.stage = Stage.COTANDO
     s.quote_result = None  # cotação nova: o resultado antigo não vale mais
-    request = QuoteRequest(
-        plano_id=s.plano_id,
-        idade=s.idade,
-        veiculo_ano=s.veiculo_ano,
-        cep=None if s.cep_ausente else s.cep,
-        data_inicio=(s.data_inicio or today).isoformat(),
-    )
-    return [DoQuote(request=request)]
+    for veiculo in s.veiculos:
+        veiculo.quote_result = None
+    cep = None if s.cep_ausente else s.cep
+    data_inicio = (s.data_inicio or today).isoformat()
+    requests = [
+        QuoteRequest(
+            plano_id=s.plano_id,
+            idade=s.idade,
+            veiculo_ano=veiculo.ano,
+            cep=cep,
+            data_inicio=data_inicio,
+        )
+        for veiculo in s.veiculos
+    ]
+    return [DoQuotes(requests=requests)]
 
 
 # --------------------------------------------------------------------------- pós-cotação
 def _pos_cotacao(s: LeadState) -> tuple[LeadState, list[Action]]:
-    """Traduz o resultado da API em ação. Preço só aparece aqui, vindo do `Quote`."""
-    resultado = s.quote_result
-    if resultado is None:  # defensivo: só chamado com o resultado já gravado
+    """Traduz os resultados da API em ação. Preço só aparece aqui, vindo do `Quote`.
+
+    Três baldes: o que cotou vira apresentação (um carro = `Present`, vários = `PresentMany`,
+    com os recusados e os pendentes citados linha a linha); sem NENHUM cotado, vale o
+    comportamento entregue — recusa se todos foram recusados, humano no resto.
+    """
+    cotados = _veiculos_cotados(s)
+    if not cotados:  # defensivo: só chamado com resultado já gravado
         return _handoff(s, HandoffReason.ERRO_INTERNO)
-    if resultado.outcome is QuoteOutcome.OK:
+
+    if any(v.quote_result.outcome is QuoteOutcome.OK for v in cotados):
         s.stage = Stage.APRESENTADO
-        return s, [Present(result=resultado, cep_ausente=s.cep_ausente)]
-    if resultado.outcome is QuoteOutcome.RECUSA:
-        s.stage = Stage.ENCERRADO_RECUSA
-        return s, [Refuse(motivo=resultado.motivo_recusa or "perfil fora dos nossos critérios")]
-    if resultado.outcome is QuoteOutcome.BUG:
+        if len(cotados) == 1:
+            return s, [Present(result=cotados[0].quote_result, cep_ausente=s.cep_ausente)]
+        return s, [PresentMany(resultados=cotados, cep_ausente=s.cep_ausente)]
+
+    if any(v.quote_result.outcome is QuoteOutcome.BUG for v in cotados):
         return _handoff(s, HandoffReason.ERRO_INTERNO)
-    return _handoff(s, HandoffReason.COTACAO_INDISPONIVEL)
+    if any(v.quote_result.outcome is QuoteOutcome.INDISPONIVEL for v in cotados):
+        return _handoff(s, HandoffReason.COTACAO_INDISPONIVEL)
+    s.stage = Stage.ENCERRADO_RECUSA
+    motivo = cotados[0].quote_result.motivo_recusa or "perfil fora dos nossos critérios"
+    return s, [Refuse(motivo=motivo)]
 
 
 def _pos_apresentacao(
@@ -426,6 +585,7 @@ def _dados_coletados(s: LeadState) -> dict[str, Any]:
     return {
         "nome": s.lead_nome,
         "idade": s.idade,
+        "veiculos": [{"texto": v.texto, "ano": v.ano} for v in s.veiculos],
         "veiculo_texto": s.veiculo_texto,
         "veiculo_ano": s.veiculo_ano,
         "cep": s.cep,
@@ -442,9 +602,16 @@ def _payload_handoff(s: LeadState, reason: HandoffReason) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "dados": _dados_coletados(s),
         "cotacao": None,
+        "cotacoes": [],
         "motivo": reason.value,
         "conversation_id": s.conversation_id,
     }
+    # `cotacao`/`quote_id` continuam sendo os do primeiro carro (o humano de hoje lê isso);
+    # `cotacoes` é a lista completa, uma entrada por carro cotado.
+    payload["cotacoes"] = [
+        {"carro": v.rotulo(), "cotacao": v.quote_result.model_dump(mode="json")}
+        for v in _veiculos_cotados(s)
+    ]
     if s.quote_result is not None:
         payload["cotacao"] = s.quote_result.model_dump(mode="json")
         payload["quote_id"] = s.quote_result.quote_id

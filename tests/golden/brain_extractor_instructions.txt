@@ -9,8 +9,12 @@ Já coletado até aqui: idade: 35; carro: Onix 2022 (ano 2022); cep: 01310100; p
 Regras:
 - Extraia SÓ o que a mensagem ATUAL diz. O que já estava coletado não se repete: campo não citado agora = null.
 - idade: número inteiro de anos do condutor. Não confunda com ano do carro.
-- veiculo_texto: como o lead falou ("Onix 2019", "gol quadrado"). veiculo_ano: o ano citado.
-- ano_parece_modelo = true quando veiculo_ano for maior que 2026 (provável ano-modelo, não de fabricação).
+- veiculos: UM item por carro citado na mensagem, na ordem em que aparecem — texto (como o lead falou:
+  "Onix 2022", "gol quadrado"), ano (o ano de fabricação citado) e ano_parece_modelo. O lead pode pedir
+  mais de um carro de uma vez ("quero cotar dois carros: um Onix 2022 e um HB20 2020") — não junte tudo
+  num item só. Carro citado sem ano entra na lista com ano null.
+- veiculo_texto, veiculo_ano e ano_parece_modelo: repita o PRIMEIRO item de veiculos (compatibilidade).
+- ano_parece_modelo = true quando o ano for maior que 2026 (provável ano-modelo, não de fabricação).
 - cep: copie como o lead escreveu, sem limpar.
 - plano_id: só se ele nomear um plano (essencial, completo, premium).
 - data_inicio: resolva datas relativas para uma data real usando hoje = 2026-09-01

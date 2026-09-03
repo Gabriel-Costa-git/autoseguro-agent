@@ -105,12 +105,13 @@ def test_mensagem_devolve_outbound_e_estado(tmp_path, monkeypatch):
 
     corpo = client.post(f"/api/lab/sessions/{sid}/messages", json={"text": "oi, tenho 35 anos"}).json()
 
-    assert corpo["outbound"] == [
-        {"message_id": "m1-o1", "text": "Qual o ano do carro?", "source": "llm"}
-    ]
+    # ordem F8: depois da idade vem o plano, que é template do presenter (não passa pelo LLM)
+    assert len(corpo["outbound"]) == 1
+    assert corpo["outbound"][0]["source"] == "template"
+    assert "Qual deles quer que eu cote" in corpo["outbound"][0]["text"]
     assert corpo["state"]["idade"] == 35
-    assert corpo["state"]["stage"] == "coleta_veiculo"
-    assert corpo["state"]["ultima_pergunta"] == "veiculo"
+    assert corpo["state"]["stage"] == "escolha_plano"
+    assert corpo["state"]["ultima_pergunta"] == "plano"
     assert client.get(f"/api/lab/sessions/{sid}/state").json()["idade"] == 35
 
 
@@ -131,18 +132,18 @@ def test_conversa_completa_ate_a_cotacao_com_o_agente_real(tmp_path, monkeypatch
     """Caminho feliz de ponta a ponta: o preço só aparece depois da API responder."""
     extracoes = [
         FakeRun(content=Extraction(intent=Intent.FORNECER_DADOS, idade=35)),
+        FakeRun(content=Extraction(intent=Intent.ESCOLHER_PLANO, plano_id="completo")),
         FakeRun(content=Extraction(intent=Intent.FORNECER_DADOS, veiculo_texto="Onix", veiculo_ano=2019)),
         FakeRun(content=Extraction(intent=Intent.FORNECER_DADOS, cep="01310-100")),
         FakeRun(content=Extraction(intent=Intent.CONFIRMAR)),
-        FakeRun(content=Extraction(intent=Intent.ESCOLHER_PLANO, plano_id="completo")),
     ]
     respostas = [FakeRun(content=f"pergunta {n}") for n in range(1, 5)]
     client, _ = _app(tmp_path, monkeypatch, extracoes, respostas, status_quote=[503, 200])
     sid = _sid(client)
 
-    for texto in ["tenho 35", "Onix 2019", "01310-100", "sim"]:
+    for texto in ["tenho 35", "quero o completo", "Onix 2019", "01310-100"]:
         client.post(f"/api/lab/sessions/{sid}/messages", json={"text": texto})
-    corpo = client.post(f"/api/lab/sessions/{sid}/messages", json={"text": "quero o completo"}).json()
+    corpo = client.post(f"/api/lab/sessions/{sid}/messages", json={"text": "sim"}).json()
 
     assert corpo["state"]["stage"] == "apresentado"
     assert corpo["state"]["cotacao"]["outcome"] == "ok"
@@ -165,9 +166,19 @@ def test_midia_sem_texto_nao_chama_o_llm(tmp_path, monkeypatch):
 
 # --------------------------------------------------------------------------- eventos
 def test_barramento_recebe_eventos_do_logger_e_o_llm_trace(tmp_path, monkeypatch):
-    client, manager = _app(tmp_path, monkeypatch)
+    # duas mensagens: a 1ª (idade) é respondida por template, a 2ª (plano) chama o Responder
+    client, manager = _app(
+        tmp_path,
+        monkeypatch,
+        [
+            FakeRun(content=Extraction(intent=Intent.FORNECER_DADOS, idade=35)),
+            FakeRun(content=Extraction(intent=Intent.ESCOLHER_PLANO, plano_id="completo")),
+        ],
+        [FakeRun(content="Qual o ano do carro?")],
+    )
     sid = _sid(client)
     client.post(f"/api/lab/sessions/{sid}/messages", json={"text": "oi, tenho 35 anos"})
+    client.post(f"/api/lab/sessions/{sid}/messages", json={"text": "quero o completo"})
 
     eventos = manager.sessao(sid).bus.historico()
     kinds = [e["event"] for e in eventos]
@@ -175,8 +186,8 @@ def test_barramento_recebe_eventos_do_logger_e_o_llm_trace(tmp_path, monkeypatch
         assert esperado in kinds, kinds
 
     traces = [e for e in eventos if e["event"] == "llm_trace"]
-    assert [t["data"]["papel"] for t in traces] == ["extractor", "responder"]
-    assert [t["conversation_id"] for t in traces] == [sid, sid]
+    assert [t["data"]["papel"] for t in traces] == ["extractor", "extractor", "responder"]
+    assert [t["conversation_id"] for t in traces] == [sid, sid, sid]
     assert traces[0]["data"]["session_id"] == f"extract-{sid}"   # o agno do Extractor usa sessão à parte
     trace = traces[0]["data"]
     assert trace["status"] == "ok" and trace["tentativa"] == 1
@@ -184,7 +195,7 @@ def test_barramento_recebe_eventos_do_logger_e_o_llm_trace(tmp_path, monkeypatch
     assert trace["entrada"] == "oi, tenho 35 anos"
     assert trace["saida"]["idade"] == 35
     # o trace vai cru (é para ler o prompt), mas o evento do logger continua mascarado
-    assert traces[1]["data"]["instructions"].startswith("Você é consultor de vendas")
+    assert traces[2]["data"]["instructions"].startswith("Você é consultor de vendas")
 
 
 def test_evento_do_logger_vai_para_o_arquivo_em_logs_studio(tmp_path, monkeypatch):

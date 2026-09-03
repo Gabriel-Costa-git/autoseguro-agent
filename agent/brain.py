@@ -60,6 +60,16 @@ def contem_preco(texto: str) -> bool:
     return bool(_PRECO_RE.search(texto or ""))
 
 
+def tem_cotacao_ok(state: LeadState) -> bool:
+    """Alguma cotação da conversa voltou OK da API? (com N carros, basta uma)."""
+    if state.quote_result is not None and state.quote_result.outcome is QuoteOutcome.OK:
+        return True
+    return any(
+        v.quote_result is not None and v.quote_result.outcome is QuoteOutcome.OK
+        for v in state.veiculos
+    )
+
+
 def guard_price(text: str, state: LeadState) -> str:
     """Substitui a resposta do LLM por um fallback determinístico se ela citar dinheiro.
 
@@ -70,8 +80,7 @@ def guard_price(text: str, state: LeadState) -> str:
     Sem toggle e sem parâmetro: este é o guardrail da regra de ouro, não é
     configurável pelo Studio.
     """
-    cotado = state.quote_result is not None and state.quote_result.outcome is QuoteOutcome.OK
-    if cotado or not contem_preco(text):
+    if tem_cotacao_ok(state) or not contem_preco(text):
         return text
     log.warning(
         "guardrail de preço disparou (conversation_id=%s, campo=%s)",
@@ -240,11 +249,18 @@ def directive_for_field(campo: CampoColeta, motivo: str | None = None) -> str:
     return f"{base} (contexto: {motivo})" if motivo else base
 
 
+def _resumo_carros(state: LeadState) -> str:
+    """Um carro mantém o texto entregue; a partir de dois, a lista inteira (slot próprio)."""
+    if len(state.veiculos) > 1:
+        return store.text("brain.resumo_carros", carros="; ".join(v.rotulo() for v in state.veiculos))
+    return f"carro: {state.veiculo_texto or '—'} (ano {state.veiculo_ano or '—'})"
+
+
 def resumo_state(state: LeadState) -> str:
     """Resumo do estado para o prompt. NUNCA inclui valores da cotação — só o status."""
     partes = [
         f"idade: {state.idade if state.idade is not None else '—'}",
-        f"carro: {state.veiculo_texto or '—'} (ano {state.veiculo_ano or '—'})",
+        _resumo_carros(state),
         f"cep: {state.cep or ('não sabe' if state.cep_ausente else '—')}",
         f"plano escolhido: {state.plano_id or '—'}",
         f"início desejado: {state.data_inicio.isoformat() if state.data_inicio else '—'}",

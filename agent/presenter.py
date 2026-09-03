@@ -3,7 +3,7 @@
 Tudo que envolve preço, cobertura, carência ou promessa ao lead é renderizado
 aqui, com os números vindos exclusivamente do `Quote` (que só nasce da API).
 `AskField`/`Reply` são de propósito responsabilidade do Responder (LLM) e
-`DoQuote` é do cliente HTTP — pedir render dessas ações é erro de programação.
+`DoQuotes` é do cliente HTTP — pedir render dessas ações é erro de programação.
 
 Os textos são slots editáveis no Studio (`agent/defaults.py` guarda o default =
 comportamento entregue). O template só recebe placeholders JÁ formatados: moeda,
@@ -25,9 +25,12 @@ from agent.models import (
     LeadState,
     PlanoResumo,
     Present,
+    PresentMany,
+    Quote,
     QuoteOutcome,
     Refuse,
     SendText,
+    VeiculoColetado,
 )
 from agent.runtime_config import ConfigError, store
 
@@ -46,14 +49,16 @@ def render(action: Action, state: LeadState) -> str:
     if isinstance(action, AskPlan):
         return _ask_plan(action)
     if isinstance(action, Present):
-        return _present(action)
+        return _present(action, state)
+    if isinstance(action, PresentMany):
+        return _present_many(action, state)
     if isinstance(action, Refuse):
         return _refuse(action)
     if isinstance(action, Handoff):
         return _handoff(action, state)
     raise ValueError(
         f"{type(action).__name__} não é ação de template: "
-        "AskField e Reply são do Responder (LLM) e DoQuote é do quote_client."
+        "AskField e Reply são do Responder (LLM) e DoQuotes é do quote_client."
     )
 
 
@@ -83,28 +88,77 @@ def _linha_plano(plano: PlanoResumo) -> str:
     )
 
 
-def _present(action: Present) -> str:
+def _present(action: Present, state: LeadState) -> str:
     quote = action.result.quote
     if action.result.outcome is not QuoteOutcome.OK or quote is None:
         raise ValueError("Present só renderiza cotação com outcome OK e quote preenchido.")
 
+    linhas = [_t("presenter.present.titulo", plano_nome=quote.plano_nome), ""]
+    linhas += _corpo_da_cotacao(quote)
+    if action.cep_ausente:
+        linhas.append(_t("presenter.present.aviso_cep_ausente"))
+    linhas += ["", _cta(state, quote)]
+    return "\n".join(linhas)
+
+
+def _present_many(action: PresentMany, state: LeadState) -> str:
+    """Vários carros numa mensagem: um bloco por carro cotado, e UM fechamento no fim."""
+    cotados = [v for v in action.resultados if _quote_ok(v) is not None]
+    if not cotados:
+        raise ValueError("PresentMany só renderiza com pelo menos uma cotação OK.")
+
+    primeiro = _quote_ok(cotados[0])
+    assert primeiro is not None
+    linhas = [
+        _t("presenter.present_many.cabecalho", n=len(action.resultados), plano_nome=primeiro.plano_nome)
+    ]
+    for veiculo in action.resultados:
+        linhas.append("")
+        linhas += _bloco_do_carro(veiculo)
+
+    if action.cep_ausente:
+        linhas += ["", _t("presenter.present.aviso_cep_ausente")]
+    linhas += ["", _cta(state, primeiro)]
+    return "\n".join(linhas)
+
+
+def _bloco_do_carro(veiculo: VeiculoColetado) -> list[str]:
+    """Bloco de um carro: cotação, recusa com o motivo, ou 'te mando em seguida'."""
+    carro = veiculo.rotulo()
+    resultado = veiculo.quote_result
+    quote = _quote_ok(veiculo)
+    if quote is None:
+        if resultado is not None and resultado.outcome is QuoteOutcome.RECUSA:
+            motivo = _minuscula_inicial(resultado.motivo_recusa or "não cotamos esse perfil")
+            return [_t("presenter.present_many.linha_recusa", carro=carro, motivo=motivo)]
+        return [_t("presenter.present_many.linha_pendente", carro=carro)]
+    return [_t("presenter.present_many.titulo_carro", carro=carro), *_corpo_da_cotacao(quote)]
+
+
+def _quote_ok(veiculo: VeiculoColetado) -> Quote | None:
+    resultado = veiculo.quote_result
+    if resultado is None or resultado.outcome is not QuoteOutcome.OK:
+        return None
+    return resultado.quote
+
+
+def _corpo_da_cotacao(quote: Quote) -> list[str]:
+    """Preço, franquia, coberturas, carência e pro-rata — o mesmo corpo para 1 ou N carros."""
     premio = _brl(quote.premio_mensal)
     linhas = [
-        _t("presenter.present.titulo", plano_nome=quote.plano_nome),
-        "",
         _t("presenter.present.preco", premio=premio),
         _t("presenter.present.franquia", franquia=_brl(quote.franquia)),
         _t("presenter.present.coberturas", coberturas=_lista(_coberturas(quote.coberturas))),
     ]
-
     if quote.carencia_coberturas and quote.carencia_dias:
-        aviso = _t(
-            "presenter.present.carencia",
-            coberturas_carencia=_lista(_coberturas(quote.carencia_coberturas)),
-            dias=quote.carencia_dias,
-        )
-        linhas += ["", aviso]
-
+        linhas += [
+            "",
+            _t(
+                "presenter.present.carencia",
+                coberturas_carencia=_lista(_coberturas(quote.carencia_coberturas)),
+                dias=quote.carencia_dias,
+            ),
+        ]
     if quote.pro_rata is not None:
         linhas.append(
             _t(
@@ -114,12 +168,14 @@ def _present(action: Present) -> str:
                 premio=premio,
             )
         )
+    return linhas
 
-    if action.cep_ausente:
-        linhas.append(_t("presenter.present.aviso_cep_ausente"))
 
-    linhas += ["", _t("presenter.present.cta")]
-    return "\n".join(linhas)
+def _cta(state: LeadState, quote: Quote) -> str:
+    """Fechamento. Quando o plano foi assumido pela policy, o texto convida a trocar."""
+    if state.plano_assumido:
+        return _t("presenter.present.cta_plano_assumido", plano_nome=quote.plano_nome)
+    return _t("presenter.present.cta")
 
 
 def _refuse(action: Refuse) -> str:
