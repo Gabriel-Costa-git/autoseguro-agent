@@ -109,7 +109,7 @@ def test_mensagem_devolve_outbound_e_estado(tmp_path, monkeypatch):
     # ordem F8: depois da idade vem o plano, que é template do presenter (não passa pelo LLM)
     assert len(corpo["outbound"]) == 1
     assert corpo["outbound"][0]["source"] == "template"
-    assert "Qual deles quer que eu cote" in corpo["outbound"][0]["text"]
+    assert "Qual deles quer cotar?" in corpo["outbound"][0]["text"]
     assert corpo["state"]["idade"] == 35
     assert corpo["state"]["stage"] == "escolha_plano"
     assert corpo["state"]["ultima_pergunta"] == "plano"
@@ -196,11 +196,11 @@ def test_barramento_recebe_eventos_do_logger_e_o_llm_trace(tmp_path, monkeypatch
     assert traces[0]["data"]["session_id"] == f"extract-{sid}"   # o agno do Extractor usa sessão à parte
     trace = traces[0]["data"]
     assert trace["status"] == "ok" and trace["tentativa"] == 1
-    assert "Você extrai dados estruturados" in trace["instructions"]
+    assert "Você extrai dados de UMA mensagem" in trace["instructions"]
     assert trace["entrada"] == "oi, tenho 35 anos"
     assert trace["saida"]["idade"] == 35
     # o trace vai cru (é para ler o prompt), mas o evento do logger continua mascarado
-    assert traces[2]["data"]["instructions"].startswith("Você é consultor de vendas")
+    assert traces[2]["data"]["instructions"].startswith("Você é a Lia, consultora de vendas")
 
 
 def test_evento_do_logger_vai_para_o_arquivo_em_logs_studio(tmp_path, monkeypatch):

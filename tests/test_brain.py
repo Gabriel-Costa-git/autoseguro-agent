@@ -351,7 +351,7 @@ def _store_isolado(monkeypatch, tmp_path) -> ConfigStore:
 
 def test_prompt_do_extractor_vem_do_slot_e_muda_ao_trocar_a_versao(monkeypatch, tmp_path):
     store = _store_isolado(monkeypatch, tmp_path)
-    assert "Você extrai dados estruturados" in build_extraction_instructions(_state(), HOJE)
+    assert "Você extrai dados de UMA mensagem" in build_extraction_instructions(_state(), HOJE)
 
     store.add_version("extractor.instructions", "curto", "Hoje é {today}. Estado: {resumo}.")
     saida = build_extraction_instructions(_state(idade=35), HOJE)
@@ -456,9 +456,10 @@ def test_trace_do_extractor_traz_prompt_entrada_e_saida():
     assert len(eventos) == 1
     ev = eventos[0]
     assert set(ev) == {
-        "papel", "modelo", "session_id", "tentativa", "instructions",
-        "historico", "entrada", "saida", "status", "latency_ms", "erro",
+        "evento", "papel", "modelo", "session_id", "tentativa", "instructions",
+        "historico", "entrada", "saida", "status", "latency_ms", "erro", "usage",
     }
+    assert ev["evento"] == "llm_call"
     assert ev["papel"] == "extractor" and ev["status"] == "ok" and ev["tentativa"] == 1
     assert ev["session_id"] == "extract-c9"
     assert ev["entrada"] == "tenho 35"
@@ -478,10 +479,17 @@ def test_trace_registra_cada_tentativa_e_o_fallback():
 
     saida = asyncio.run(ex.extract("oi", _state(), HOJE))
     assert saida.indisponivel is True
-    assert [e["status"] for e in eventos] == ["erro", "erro", "erro", "erro", "fallback"]
-    assert [e["tentativa"] for e in eventos] == [1, 2, 3, 4, 4]
-    assert "RESOURCE_EXHAUSTED" in eventos[0]["erro"]
-    assert eventos[-1]["saida"]["indisponivel"] is True
+    chamadas = [e for e in eventos if e["evento"] == "llm_call"]
+    assert [e["status"] for e in chamadas] == ["erro", "erro", "erro", "erro", "fallback"]
+    assert [e["tentativa"] for e in chamadas] == [1, 2, 3, 4, 4]
+    assert "RESOURCE_EXHAUSTED" in chamadas[0]["erro"]
+    assert chamadas[-1]["saida"]["indisponivel"] is True
+    # e, ao lado deles, o rastro que faltava no log da Fase 3: cada espera e a desistência
+    assert [e["evento"] for e in eventos if e["evento"] != "llm_call"] == [
+        "llm_retry", "llm_retry", "llm_retry", "llm_error",
+    ]
+    assert [e["espera_s"] for e in eventos if e["evento"] == "llm_retry"] == [4.0, 4.0, 4.0]
+    assert all(e["status"] == 429 for e in eventos if e["evento"] != "llm_call")
 
 
 def test_trace_do_responder_marca_fallback_com_o_texto_devolvido():
@@ -552,8 +560,8 @@ def test_guard_price_dispara_quando_nenhum_carro_cotou():
 def test_prompt_do_extractor_pede_a_lista_de_carros():
     prompt = build_extraction_instructions(_state(), HOJE)
     assert "veiculos: UM item por carro citado" in prompt
-    assert "não junte tudo" in prompt
-    assert "repita o PRIMEIRO item de veiculos" in prompt     # compatibilidade com 1 carro
+    assert "não viram um item só" in prompt
+    assert "Repita o PRIMEIRO item em veiculo_texto" in prompt   # compatibilidade com 1 carro
 
 
 # --------------------------------------------------------------------------- guardrails e abertura (F10)
@@ -584,7 +592,7 @@ def test_sem_planos_as_coberturas_saem_dos_slots_do_presenter():
 
 
 def test_abertura_so_entra_no_primeiro_turno():
-    abertura = "apresente-se em uma frase como Lia"
+    abertura = "apresente-se em UMA linha como Lia"
     assert abertura in build_responder_instructions(_state(), "pergunte a idade")          # turnos=0
     assert abertura in build_responder_instructions(_state(turnos=1), "pergunte a idade")  # 1º turno
     assert abertura not in build_responder_instructions(_state(turnos=2), "peça o CEP")
@@ -622,3 +630,374 @@ def test_valores_citados_le_as_formas_de_dinheiro():
     assert valores_citados("R$ 4.500,00 e 209,90 e 200 reais") == {4500.0, 209.9, 200.0}
     assert valores_citados("tenho 35 anos e um Onix 2019") == set()
 
+
+# --------------------------------------------------------------------------- histórico (fix C)
+def test_historico_kwargs_e_o_contrato_do_responder():
+    kwargs = brain.historico_kwargs()
+    assert kwargs["add_history_to_context"] is True
+    assert kwargs["num_history_runs"] == brain.RESPONDER_HISTORY_RUNS == 4
+    assert kwargs["system_message_role"] == "system"
+
+
+def test_historico_nunca_traz_system_do_passado():
+    """Nenhum system prompt de run antigo entra no histórico — provado contra a API do agno.
+
+    `num_history_runs` e `num_history_messages` são mutuamente exclusivos no agno 3.0.5, então
+    quem garante isso é o `system_message_role`, que o `get_run_messages` usa como `skip_roles`.
+    Se um upgrade mudar essa regra, este teste quebra antes de a conta de tokens subir.
+    """
+    from agno.models.message import Message
+    from agno.run.agent import RunOutput
+    from agno.session.agent import AgentSession
+
+    kwargs = brain.historico_kwargs()
+    runs = [
+        RunOutput(
+            run_id=f"r{n}",
+            messages=[
+                Message(role="system", content=f"PROMPT ANTIGO {n}"),
+                Message(role="user", content=f"mensagem {n}"),
+                Message(role="assistant", content=f"resposta {n}"),
+            ],
+        )
+        for n in range(1, 7)
+    ]
+    historico = AgentSession(session_id="s", runs=runs).get_messages(
+        last_n_runs=kwargs["num_history_runs"],
+        limit=None,
+        skip_roles=[kwargs["system_message_role"]],
+    )
+
+    assert [m.role for m in historico] == ["user", "assistant"] * 4      # 4 runs, não 6
+    assert not any("PROMPT ANTIGO" in str(m.content) for m in historico)
+    assert brain.system_do_historico(
+        [{"role": m.role, "content": m.content, "from_history": True} for m in historico]
+    ) == []
+
+
+def test_system_do_historico_denuncia_prompt_antigo():
+    """O detector que roda em produção: se o agno voltar a mandar system, o trace mostra."""
+    historico = [
+        {"role": "system", "content": "prompt DESTE turno", "from_history": False},
+        {"role": "system", "content": "prompt ANTIGO", "from_history": True},
+        {"role": "user", "content": "oi", "from_history": True},
+    ]
+    assert brain.system_do_historico(historico) == [
+        {"role": "system", "content": "prompt ANTIGO", "from_history": True}
+    ]
+
+
+def test_history_runs_respeita_override_do_studio(monkeypatch, tmp_path):
+    store = _store_isolado(monkeypatch, tmp_path)
+    assert brain.responder_history_runs() == 4
+    store.set_overrides("settings", {"responder_history_runs": 6})
+    assert brain.responder_history_runs() == 6
+
+
+# --------------------------------------------------------------------------- validação pós-LLM
+def test_guard_descarta_pergunta_de_campo_que_ja_esta_no_estado():
+    """s01 real: diretiva era "pergunte o CEP" e o modelo perguntou a idade, que já tinha."""
+    state = _state(idade=35, ultima_pergunta="cep")
+    texto, achado = brain.guard_resposta(
+        "Perfeito, Onix 2022 anotado. Qual é a sua idade?", state, directive="pergunte o CEP"
+    )
+    assert texto == fallback_text("cep")
+    assert achado == {"regra": "campo_ja_preenchido:idade", "trecho": "Qual é a sua idade?"}
+
+
+def test_guard_deixa_repetir_o_campo_quando_a_diretiva_pediu():
+    """Confirmação de ano-modelo e correção de CEP pedem justamente perguntar de novo."""
+    state = _state(veiculo_ano=2027, ultima_pergunta="veiculo")
+    texto = "Esse 2027 parece ano-modelo. Qual o ano de fabricação?"
+    assert brain.guard_resposta(texto, state, directive=directive_for_field("veiculo")) == (texto, None)
+
+
+def test_guard_descarta_historico_inexistente_no_primeiro_turno():
+    """s03 real: "Como te disse antes" na PRIMEIRA mensagem da conversa."""
+    state = _state(turnos=1, ultima_pergunta="idade")
+    texto, achado = brain.guard_resposta(
+        "Oi! Como te disse antes, não precisa desses dados agora.", state, directive="pergunte a idade"
+    )
+    assert texto == fallback_text("idade")
+    assert achado is not None and achado["regra"] == "historico_inexistente"
+
+
+def test_guard_aceita_referencia_ao_historico_depois_do_primeiro_turno():
+    state = _state(turnos=5, ultima_pergunta="plano")
+    texto = "Como te disse, a franquia muda por plano."
+    assert brain.guard_resposta(texto, state, directive="pergunte o plano") == (texto, None)
+
+
+@pytest.mark.parametrize(
+    "resposta",
+    [
+        "Entendo perfeitamente. Posso ajustar a franquia para caber melhor no seu bolso, o que acha?",
+        "Consigo um desconto pra você fechar hoje.",
+        "Faço por menos se você fechar agora.",
+        "Consigo negociar essa parcela com você.",
+    ],
+)
+def test_guard_descarta_promessa_de_ajuste_ou_desconto(resposta: str):
+    """s10a real: "Posso ajustar a franquia" — a franquia é fixa por plano."""
+    state = _state(idade=35, ultima_pergunta="plano", turnos=4)
+    texto, achado = brain.guard_resposta(resposta, state, directive="ofereça ver outro plano")
+    assert texto == fallback_text("plano")
+    assert achado is not None and achado["regra"] == "promessa"
+
+
+@pytest.mark.parametrize(
+    "resposta",
+    [
+        "Isso, o plano essencial é bem completo.",
+        "O Premium é o melhor custo-benefício da casa.",
+        "Esse é o ideal para você.",
+        "Vale muito a pena.",
+    ],
+)
+def test_guard_descarta_qualificacao_de_plano(resposta: str):
+    """s05b real: "o plano essencial é bem completo" — confunde com o plano Completo."""
+    state = _state(idade=35, ultima_pergunta="plano", turnos=3)
+    texto, achado = brain.guard_resposta(resposta, state, directive="pergunte o plano")
+    assert texto == fallback_text("plano")
+    assert achado is not None and achado["regra"] == "qualifica_plano"
+
+
+@pytest.mark.parametrize(
+    "resposta",
+    [
+        "Deve ficar em R$ 180,00 por mês.",
+        "Fica 209.90 por mês.",
+        "Fica uns 200 reais.",
+        "Costuma ficar uns 250 no seu perfil.",
+        "Varia de 150 a 300 por mês.",
+        "Fica em torno de duzentos por mês.",
+    ],
+)
+def test_guard_descarta_valor_fora_da_cotacao(resposta: str):
+    """Guard ampliado: valor exato, forma vaga e número por extenso, todos sem cotação OK."""
+    state = _state(ultima_pergunta="cep", turnos=3)
+    texto, achado = brain.guard_resposta(resposta, state, directive="peça o CEP")
+    assert texto == fallback_text("cep")
+    assert achado is not None and achado["regra"] == "valor_inventado"
+
+
+def test_guard_libera_valor_quando_a_cotacao_veio_da_api():
+    state = _state(ultima_pergunta="plano", turnos=4, quote_result=quote_ok())
+    texto = "O valor de R$ 209,90 que te passei já inclui assistência."
+    assert brain.guard_resposta(texto, state, directive="retome a dúvida") == (texto, None)
+
+
+def test_guard_libera_franquia_que_estava_no_material_da_diretiva():
+    dados = "- Essencial: franquia de R$ 4.500,00\n- Completo: franquia de R$ 3.000,00"
+    texto = "O Essencial tem franquia de R$ 4.500,00 e o Completo, R$ 3.000,00."
+    assert brain.guard_resposta(texto, _state(turnos=3), directive=dados) == (texto, None)
+
+
+def test_guard_nao_mexe_em_resposta_boa():
+    state = _state(idade=35, ultima_pergunta="veiculo", turnos=2)
+    texto = "Anotado! Qual o modelo e o ano de fabricação do carro?"
+    assert brain.guard_resposta(texto, state, directive=directive_for_field("veiculo")) == (texto, None)
+
+
+def test_contem_valor_pega_as_formas_vagas_e_contem_preco_nao():
+    assert brain.contem_valor("uns 200") and not contem_preco("uns 200")
+    assert brain.contem_valor("de 150 a 300") and not contem_preco("de 150 a 300")
+    assert brain.contem_valor("quinhentos") and not contem_preco("quinhentos")
+    assert not brain.contem_valor("seu Onix 2019, 35 anos, cep 01310100")
+    assert not brain.contem_valor("01.310-100")          # CEP com ponto não é dinheiro
+
+
+# --------------------------------------------------------------------------- usage / tentativas
+class _Metrics:
+    """`RunOutput.metrics` no que o brain lê."""
+
+    def __init__(self, entrada: int, saida: int, cache: int = 0) -> None:
+        self.input_tokens = entrada
+        self.output_tokens = saida
+        self.total_tokens = entrada + saida
+        self.cache_read_tokens = cache
+
+
+def _run_com_usage(content, entrada: int, saida: int, cache: int = 0) -> FakeRun:
+    run = FakeRun(content=content)
+    run.metrics = _Metrics(entrada, saida, cache)
+    return run
+
+
+@pytest.mark.asyncio
+async def test_extractor_expoe_usage_e_tentativas_para_o_turno():
+    ex = _extractor([_run_com_usage(Extraction(idade=35), 1250, 40, cache=0)])
+    assert (await ex.extract("tenho 35", _state(conversation_id="c7"), HOJE)).idade == 35
+
+    uso = ex.drenar_usage("c7")
+    assert uso["usage"] == {"input": 1250, "output": 40, "total": 1290, "cache_read": 0}
+    assert uso["tentativas"] == 1 and uso["source"] == "llm"
+    assert uso["model"]                                  # o log do JSONL não tinha o modelo
+    assert ex.drenar_usage("c7") == {}                   # drenou, esqueceu
+
+
+@pytest.mark.asyncio
+async def test_usage_soma_as_tentativas_porque_todas_foram_pagas():
+    ex = _extractor([run_erro(ERRO_429), _run_com_usage(Extraction(idade=40), 1200, 30)])
+    await ex.extract("40", _state(conversation_id="c8"), HOJE)
+    uso = ex.drenar_usage("c8")
+    assert uso["tentativas"] == 2
+    assert uso["usage"]["input"] == 1200                 # o run que falhou não contou tokens
+
+
+@pytest.mark.asyncio
+async def test_responder_marca_o_fallback_como_fallback_e_nao_como_llm():
+    """Fase 3: o fallback determinístico de s07b saiu no log rotulado `source=llm`."""
+    resp = _responder([run_erro(ERRO_429) for _ in range(4)])
+    saida = await resp.reply("peça o CEP", _state(conversation_id="c9", ultima_pergunta="cep"), "moro em SP")
+
+    assert saida == fallback_text("cep")
+    assert saida.source == "fallback"
+    uso = resp.drenar_usage("c9")
+    assert uso["source"] == "fallback" and uso["tentativas"] == 4
+
+
+@pytest.mark.asyncio
+async def test_responder_ok_sai_como_llm_e_guard_como_fallback():
+    ok = _responder([FakeRun(content="Qual o ano do carro?")])
+    saida = await ok.reply("pergunte o ano", _state(conversation_id="ca"), "é um Onix")
+    assert saida.source == "llm" and ok.drenar_usage("ca")["guard"] is None
+
+    ruim = _responder([FakeRun(content="Posso ajustar a franquia pra você.")])
+    state = _state(conversation_id="cb", ultima_pergunta="plano", turnos=4)
+    saida = await ruim.reply("ofereça outro plano", state, "tá caro")
+    assert saida == fallback_text("plano") and saida.source == "fallback"
+    assert ruim.drenar_usage("cb")["guard"]["regra"] == "promessa"
+
+
+@pytest.mark.asyncio
+async def test_guard_emite_evento_llm_guard_no_trace():
+    eventos: list[dict] = []
+    resp = Responder(
+        agent=FakeAgnoAgent([FakeRun(content="Fica uns 200 reais.")]), sleep=SleepFake(), trace=eventos.append
+    )
+    await resp.reply("peça o CEP", _state(ultima_pergunta="cep", turnos=3), "quanto fica?")
+
+    guards = [e for e in eventos if e["evento"] == "llm_guard"]
+    assert len(guards) == 1
+    assert guards[0]["regra"] == "valor_inventado"
+    assert "uns 200" in guards[0]["trecho"]
+
+
+# --------------------------------------------------------------------------- timeout por chamada
+@pytest.mark.asyncio
+async def test_timeout_por_chamada_conta_como_transitorio_e_avisa_uma_vez(monkeypatch):
+    """Fase 3 mediu chamadas de 51 s e 70 s com o lead em silêncio. Agora há teto e aviso."""
+    monkeypatch.setattr(brain, "LLM_TIMEOUT_S", 0.01)
+    avisos: list[int] = []
+
+    class AgentLento:
+        def __init__(self) -> None:
+            self.chamadas = 0
+
+        async def arun(self, entrada, **kwargs):
+            self.chamadas += 1
+            import asyncio as aio
+
+            await aio.sleep(0.5)
+            return FakeRun(content="tarde demais")
+
+    agent = AgentLento()
+    resp = Responder(agent=agent, sleep=SleepFake())
+
+    async def on_slow() -> None:
+        avisos.append(1)
+
+    saida = await resp.reply(
+        "peça o CEP", _state(ultima_pergunta="cep", turnos=2), "moro em SP", on_slow=on_slow
+    )
+
+    assert saida == fallback_text("cep") and saida.source == "fallback"
+    assert agent.chamadas == MAX_TENTATIVAS_LLM        # timeout é transitório: re-tenta
+    assert avisos == [1]                               # "só um instante" no máximo uma vez
+
+
+@pytest.mark.asyncio
+async def test_sem_on_slow_o_timeout_nao_quebra_o_turno(monkeypatch):
+    monkeypatch.setattr(brain, "LLM_TIMEOUT_S", 0.01)
+
+    class AgentLento:
+        async def arun(self, entrada, **kwargs):
+            import asyncio as aio
+
+            await aio.sleep(0.5)
+
+    saida = await Responder(agent=AgentLento(), sleep=SleepFake()).reply("peça o CEP", _state(), "oi")
+    assert saida == fallback_text(None)
+
+
+def test_parametros_novos_nao_quebram_com_store_sem_a_chave(monkeypatch, tmp_path):
+    """`settings.llm_timeout_s` ainda não existe em `runtime_config` (fora do escopo do brief C)."""
+    _store_isolado(monkeypatch, tmp_path)
+    assert brain.llm_timeout_s() == brain.LLM_TIMEOUT_S == 12.0
+    assert brain._param_settings("chave_que_nao_existe", 7) == 7
+
+
+# --------------------------------------------------------------------------- abertura por template
+@pytest.mark.asyncio
+async def test_abertura_do_turno_1_e_template_e_nao_gasta_chamada():
+    agent = FakeAgnoAgent([])
+    resp = Responder(agent=agent, sleep=SleepFake())
+    state = _state(conversation_id="cc", turnos=1)
+
+    saida = await resp.reply(directive_for_field("idade"), state, "oi, quero cotar meu carro")
+
+    assert saida == brain.store.text("responder.abertura")
+    assert saida.source == "template"
+    assert saida.startswith("Oi! Sou a Lia, da AutoSeguro")
+    assert len(saida.splitlines()) == 2                # no máximo 2 linhas, como pediu o dono
+    assert agent.chamadas == []                        # zero token gasto no turno mais comum
+    assert resp.drenar_usage("cc") == {"model": resp._modelo(), "usage": None, "tentativas": 0, "source": "template"}
+
+
+@pytest.mark.asyncio
+async def test_abertura_nao_vale_quando_o_lead_ja_deu_a_idade_ou_o_turno_passou():
+    resp = Responder(agent=FakeAgnoAgent([FakeRun(content="Qual o carro?")]), sleep=SleepFake())
+    # o lead abriu dizendo a idade: a policy já pede o veículo, e o LLM cuida da abertura
+    assert resp.abertura(directive_for_field("veiculo"), _state(turnos=1, idade=35)) is None
+    assert resp.abertura(directive_for_field("idade"), _state(turnos=1, idade=35)) is None
+    assert resp.abertura(directive_for_field("idade"), _state(turnos=3)) is None
+    assert resp.abertura("responda a dúvida do lead", _state(turnos=1)) is None
+
+
+# --------------------------------------------------------------------------- {planos} no Extractor
+def test_prompt_do_extractor_lista_os_planos_da_vitrine_corrente():
+    planos = {"planos": [{"id": "essencial"}, {"id": "completo"}, {"id": "premium"}, {"id": "moto"}]}
+    prompt = build_extraction_instructions(_state(), HOJE, ferramentas=[], planos=planos)
+    assert "só se ele nomear um plano (essencial, completo, premium, moto)" in prompt
+
+
+def test_sem_planos_o_extractor_usa_o_catalogo_entregue():
+    prompt = build_extraction_instructions(_state(), HOJE, ferramentas=[])
+    assert f"({brain.PLANOS_PADRAO})" in prompt
+
+
+def test_bloco_dinamico_do_extractor_fica_no_fim():
+    """Prefixo estável em toda chamada é a única economia possível (cache não compensa)."""
+    prompt = build_extraction_instructions(_state(idade=35), HOJE, ferramentas=[])
+    assert prompt.rstrip().endswith('"2019" é ano se foi o veículo).')
+    assert prompt.index("Regras:") < prompt.index("Hoje é 2026-09-01")
+    assert prompt.index("intent (exatamente um):") < prompt.index("Já coletado:")
+
+
+def test_extractor_instructions_cabe_no_orcamento():
+    """Teto de 1.200 chars no slot: o Extractor roda em TODA mensagem e era 81 % dos tokens."""
+    from agent.defaults import SLOTS as SLOTS_DEF
+
+    assert len(SLOTS_DEF["extractor.instructions"]["default"]) <= 1200
+
+
+# --------------------------------------------------------------------------- forma das respostas
+def test_guardrails_trazem_as_regras_de_forma():
+    prompt = build_responder_instructions(_state(turnos=3), "peça o CEP")
+    assert "No máximo 2 frases" in prompt
+    assert "nunca dois seguidos" in prompt              # emoji em sequência
+    assert "Não repita o que outra mensagem já disse" in prompt
+    assert "Apresente-se só no primeiro turno, em no máximo 2 linhas." in prompt
+    assert "NUNCA qualifique um plano" in prompt
+    assert 'NUNCA diga "como te disse"' in prompt
