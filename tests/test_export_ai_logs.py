@@ -113,19 +113,22 @@ def test_denylist_redige_o_maior_literal_primeiro():
 def test_regras_de_caminho_trocam_repo_worktree_scratch_e_home(tmp_path):
     from pathlib import Path
 
-    repo = Path.home() / "espaco" / "projeto"
-    hig = _hig(regras=regras_de_caminho(repo))
+    # Um HOME fixo, fora de /tmp: se o teste rodar com HOME dentro de um scratch (CI, sandbox),
+    # a regra <scratch> casaria antes da <home> e o teste falharia por causa da máquina.
+    home = Path("/Users/alguem")
+    repo = home / "espaco" / "projeto"
+    hig = _hig(regras=regras_de_caminho(repo, home=str(home)))
     texto = (
         f"veja {repo}/agent/policy.py, {repo.parent}/worktrees/fix-x/tests, "
         "/private/tmp/claude-99/abc/scratchpad e "
-        f"{Path.home()}/outra-coisa"
+        f"{home}/outra-coisa"
     )
     limpo = hig.texto(texto)
     assert "<repo>/agent/policy.py" in limpo
     assert "<worktree>/tests" in limpo
     assert "<scratch>" in limpo
     assert "<home>/outra-coisa" in limpo
-    assert str(Path.home()) not in limpo
+    assert str(home) not in limpo
 
 
 # --------------------------------------------------------------------------- redações por conteúdo

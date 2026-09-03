@@ -270,9 +270,12 @@ def _prefix_res(segredos: list[str]) -> list[re.Pattern[str]]:
     return out
 
 
-def regras_de_caminho(repo: Path) -> list[tuple[re.Pattern[str], str]]:
-    """Caminhos absolutos da máquina do autor viram marcadores estáveis."""
-    home = str(Path.home())
+def regras_de_caminho(repo: Path, home: str | None = None) -> list[tuple[re.Pattern[str], str]]:
+    """Caminhos absolutos da máquina do autor viram marcadores estáveis.
+
+    `home` é injetável para o teste não depender de onde a suíte roda.
+    """
+    home = home or str(Path.home())
     worktrees = repo.parent / "worktrees"
     regras: list[tuple[re.Pattern[str], str]] = []
     for prefixo in (home, "~"):
