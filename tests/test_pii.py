@@ -1,4 +1,4 @@
-from agent.pii import mask_obj, mask_text
+from agent.pii import mask_obj, mask_text, nome_arquivo_log
 
 
 def test_mask_cpf():
@@ -58,3 +58,24 @@ def test_mask_obj_tipos_nao_string_intactos():
     assert mask_obj(42) == 42
     assert mask_obj(True) is True
     assert mask_obj(None) is None
+
+
+# --------------------------------------------------------------------------- nome do arquivo
+def test_nome_arquivo_log_esconde_o_telefone():
+    nome = nome_arquivo_log("wa-5511999990000")
+    assert nome.startswith("wa-")
+    assert "5511999990000" not in nome
+    assert len(nome) == len("wa-") + 10
+
+
+def test_nome_arquivo_log_e_estavel_e_distingue_numeros():
+    """Estável porque a conversa continua no mesmo arquivo entre processos e reinícios."""
+    assert nome_arquivo_log("wa-5511999990000") == nome_arquivo_log("wa-5511999990000")
+    assert nome_arquivo_log("wa-5511999990000") != nome_arquivo_log("wa-5511999990001")
+
+
+def test_nome_arquivo_log_nao_mexe_em_id_sem_telefone():
+    """CLI, Lab e ids do Studio não têm PII no nome: ficam legíveis."""
+    for cid in ("cli-1788350261", "lab-abc12345", "c-teste", "demo-feliz-v3"):
+        assert nome_arquivo_log(cid) == cid
+    assert nome_arquivo_log("wa-nao-numerico") == "wa-nao-numerico"

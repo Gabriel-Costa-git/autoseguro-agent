@@ -3,6 +3,12 @@
 Cada evento é uma linha JSON independente (append-only, flush imediato) para
 sobreviver a crash do processo sem perder histórico. `data` sempre passa por
 `pii.mask_obj` antes de tocar disco — o log é nosso, mas não é lugar de PII.
+
+O NOME do arquivo também não é lugar de PII: `wa-<telefone>` vira `wa-<sha1(telefone)[:10]>`
+(`pii.nome_arquivo_log`). O `conversation_id` dentro dos eventos continua sendo o id interno
+(`wa-<dígitos>`), que é o que o resto do sistema — takeover, Atendimentos, canal — usa.
+Arquivo antigo com o nome em claro continua sendo o destino da conversa dele: renomear
+histórico é outra tarefa (migração), e partir a conversa em dois arquivos seria pior.
 """
 from __future__ import annotations
 
@@ -14,7 +20,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from agent.models import EventKind
-from agent.pii import mask_obj
+from agent.pii import mask_obj, nome_arquivo_log
 
 
 def _to_jsonable(valor: Any) -> Any:
@@ -29,11 +35,25 @@ def _to_jsonable(valor: Any) -> Any:
 
 
 class ConversationLogger:
-    def __init__(self, log_dir: Path, conversation_id: str) -> None:
+    def __init__(self, log_dir: Path, conversation_id: str, nome_arquivo: str | None = None) -> None:
         self.log_dir = Path(log_dir)
         self.conversation_id = conversation_id
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self._path = self.log_dir / f"{conversation_id}.jsonl"
+        self._path = self._escolher_path(nome_arquivo)
+
+    def _escolher_path(self, nome_arquivo: str | None) -> Path:
+        """Nome explícito manda; senão o derivado — com o arquivo legado tendo prioridade."""
+        if nome_arquivo is not None:
+            return self.log_dir / f"{nome_arquivo}.jsonl"
+        legado = self.log_dir / f"{self.conversation_id}.jsonl"
+        if legado.exists():
+            return legado
+        return self.log_dir / f"{nome_arquivo_log(self.conversation_id)}.jsonl"
+
+    @property
+    def path(self) -> Path:
+        """Arquivo onde esta conversa é gravada (quem exporta/varre logs precisa saber)."""
+        return self._path
 
     def event(
         self,
