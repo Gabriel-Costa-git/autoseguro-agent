@@ -59,6 +59,10 @@ MARCA_DENYLIST = "[redigido]"
 MARCA_PESSOAL = "[redigido: arquivo pessoal de configuração, fora do escopo do desafio]"
 MARCA_OPERACIONAL = "[redigido]"
 # Assinaturas que só aparecem em texto de ferramenta.
+MARCA_FERRAMENTA = "[redigido: comando ou saída da ferramenta de orquestração de terminais]"
+# Comandos da ferramenta de orquestração e o que ela devolve (lista de terminais, checks, asks):
+# são o encanamento entre terminais, não conversa com IA. Ficam fora, com marcador à vista.
+_FERRAMENTA_RE = re.compile(r"\borq\s+(list|check|ask|recruit|dismiss|note|connect|role|preset|portal)\b|orquestrador:\s*true|Connected agents:|You:\s*-\s*name:|\bRecruited\s+\"|\bDismissed\s+\"|\bReplaced\s+\"|role \"Executor|recrutar Executor|Executor (UI|Backend)\b")
 _OPERACIONAL_RE = re.compile(r"^\s*[—-]?\s*(?:confirmando\s+)?\(operador\)|^\s*Ordem\s+—\s+GO\b")
 MARCA_IMAGEM = "[imagem removida: screenshot]"
 MARCA_BASE64 = "[binário removido: blob base64]"
@@ -298,6 +302,10 @@ class Higienizador:
 
     # ---- texto
     def texto(self, s: str) -> str:
+        if _FERRAMENTA_RE.search(s):
+            self.counts["ferramenta"] += 1
+            return MARCA_FERRAMENTA
+
         blob = self._blob(s)
         if blob is not None:
             self.counts["imagem" if blob == MARCA_IMAGEM else "base64"] += 1
