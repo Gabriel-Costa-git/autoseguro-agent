@@ -652,7 +652,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--denylist",
         type=Path,
-        default=repo.parent / "scrub-denylist.txt",
+        default=Path(os.environ.get("AI_LOGS_DENYLIST", Path.home() / ".config" / "ai-logs" / "denylist.txt")),
         help="arquivo (fora do repo) com os literais a redigir",
     )
     parser.add_argument(
